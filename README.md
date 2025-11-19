@@ -8,6 +8,7 @@ This repo contains the official implementation for the paper "2D Gaussian Splatt
 
 
 ## ⭐ New Features 
+- 2025/12/19: Our work is featured in an in-depth blog post on [LearnOpenCV](https://learnopencv.com/)! Thanks to [Shubham Anand](https://www.linkedin.com/in/shubham-anand-91a10b211/).
 - 2024/07/20: Web-based viewer [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D) also supports 2DGS. Thanks to [Mark Kellogg](https://github.com/mkkellogg).
 - 2024/07/19: [Colab Notebook](https://github.com/atakan-topaloglu/2d_gaussian_splatting_colab) is supported! Thanks to [atakan-topaloglu](https://github.com/atakan-topaloglu)
 - 2024/06/10: [SIBR Viewer](https://github.com/RongLiu-Leo/2d-gaussian-splatting) is supported! Thanks to [Rong](https://github.com/RongLiu-Leo/).
@@ -22,6 +23,20 @@ This repo contains the official implementation for the paper "2D Gaussian Splatt
 Our key idea is to contract the space into a sphere and then perform **adaptive TSDF truncation**. 
 
 ![visualization](assets/unbounded.gif)
+
+## 🎓 Community Resources & Tutorials
+
+- **gsplat library documentation** (official rasterization API reference)  
+  https://docs.gsplat.studio/main/apis/rasterization.html#id1
+
+- **GaussianSplats3D** – Popular WebGL/Three.js viewer with strong community support  
+  https://github.com/mkkellogg/GaussianSplats3D
+
+- **SuperSplat** – High-performance WebGPU viewer by PlayCanvas  
+  https://github.com/playcanvas/supersplat
+
+- **In-Depth Practitioner Guide** – Comprehensive tutorial on the full 2D Gaussian Splatting pipeline (theory to implementation) by Shubham Anand  
+  [LearnOpenCV Blog Post](https://learnopencv.com/2d-gaussian-splatting/)
 
 ## SIBR Viewer
 
