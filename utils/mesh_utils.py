@@ -90,10 +90,10 @@ class GaussianExtractor(object):
     @torch.no_grad()
     def clean(self):
         self.depthmaps = []
-        # self.alphamaps = []
+        self.alphamaps = []
         self.rgbmaps = []
-        # self.normals = []
-        # self.depth_normals = []
+        self.normals = []
+        self.depth_normals = []
         self.viewpoint_stack = []
 
     @torch.no_grad()
@@ -112,9 +112,9 @@ class GaussianExtractor(object):
             depth_normal = render_pkg['surf_normal']
             self.rgbmaps.append(rgb.cpu())
             self.depthmaps.append(depth.cpu())
-            # self.alphamaps.append(alpha.cpu())
-            # self.normals.append(normal.cpu())
-            # self.depth_normals.append(depth_normal.cpu())
+            self.alphamaps.append(alpha.cpu())
+            self.normals.append(normal.cpu())
+            self.depth_normals.append(depth_normal.cpu())
         
         # self.rgbmaps = torch.stack(self.rgbmaps, dim=0)
         # self.depthmaps = torch.stack(self.depthmaps, dim=0)
@@ -283,13 +283,21 @@ class GaussianExtractor(object):
         render_path = os.path.join(path, "renders")
         gts_path = os.path.join(path, "gt")
         vis_path = os.path.join(path, "vis")
+        alpha_path  = os.path.join(path, "alpha")   # 🔹 new
         os.makedirs(render_path, exist_ok=True)
         os.makedirs(vis_path, exist_ok=True)
         os.makedirs(gts_path, exist_ok=True)
+        os.makedirs(alpha_path, exist_ok=True)      # 🔹 new
         for idx, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="export images"):
             gt = viewpoint_cam.original_image[0:3, :, :]
             save_img_u8(gt.permute(1,2,0).cpu().numpy(), os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
             save_img_u8(self.rgbmaps[idx].permute(1,2,0).cpu().numpy(), os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
             save_img_f32(self.depthmaps[idx][0].cpu().numpy(), os.path.join(vis_path, 'depth_{0:05d}'.format(idx) + ".tiff"))
-            # save_img_u8(self.normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'normal_{0:05d}'.format(idx) + ".png"))
-            # save_img_u8(self.depth_normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'depth_normal_{0:05d}'.format(idx) + ".png"))
+            
+            # 🔹 NEW: alpha export (single-channel float tiff, like depth)
+            alpha = self.alphamaps[idx][0].cpu().numpy()   # [H, W], values in [0,1]
+            save_img_f32(alpha,
+            os.path.join(alpha_path, 'alpha_{0:05d}'.format(idx) + ".tiff"))
+            
+            save_img_u8(self.normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'normal_{0:05d}'.format(idx) + ".png"))
+            save_img_u8(self.depth_normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'depth_normal_{0:05d}'.format(idx) + ".png"))
