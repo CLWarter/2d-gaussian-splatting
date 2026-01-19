@@ -97,6 +97,22 @@ def get_source_path_for_run(model_path: str):
 
     return None, "cfg_args present but source_path not found"
 
+def export_already_done(model_path: str, it: int, require_nonempty: bool = True) -> bool:
+    export_root = os.path.join(model_path, f"export_iter_{it}")
+    gt_dir = os.path.join(export_root, "gt")
+    renders_dir = os.path.join(export_root, "renders")
+
+    if not (os.path.isdir(gt_dir) and os.path.isdir(renders_dir)):
+        return False
+
+    if not require_nonempty:
+        return True
+
+    # Require at least one file in each folder (ignores subfolders)
+    def has_files(d):
+        return any(os.path.isfile(os.path.join(d, f)) for f in os.listdir(d))
+
+    return has_files(gt_dir) and has_files(renders_dir)
 
 def validate_colmap_scene(path: str) -> bool:
     if not path or not os.path.isdir(path):
@@ -143,6 +159,11 @@ def export_for_run(model_path: str, it: int):
     """
     Load Gaussian scene at given iteration and export maps.
     """
+
+    if export_already_done(model_path, it, require_nonempty=True):
+        print(f"[SKIP] Already exported: {model_path} (export_iter_{it} has gt/ and renders/)")
+        return
+    
     print(f"\n[RUN] Model path: {model_path}")
     print(f"[RUN] Loading iteration {it}")
 
@@ -188,6 +209,11 @@ def main():
 
     for model_path, iters in runs:
         last_it = iters[-1]  # use final iteration for each run
+
+        if export_already_done(model_path, last_it, require_nonempty=True):
+            print(f"[SKIP] Already exported: {model_path} (export_iter_{last_it} has gt/ and renders/)")
+            continue
+
         export_for_run(model_path, last_it)
 
 
