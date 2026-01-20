@@ -119,7 +119,7 @@ class GaussianModel:
     
     @property
     def get_ambient(self):
-        return self._ambient
+        return self.opacity_activation(self._ambient)
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
@@ -144,9 +144,8 @@ class GaussianModel:
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        ambient = self.inverse_opacity_activation(
-            0.05 * torch.ones((1, 1), dtype=torch.float, device="cuda")
-        )
+        N = fused_point_cloud.shape[0]
+        ambient = 0.05 * torch.ones((N,1), device="cuda")
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -154,7 +153,7 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self._ambient = nn.Parameter(ambient.requires_grad_(True))
+        self._ambient = nn.Parameter(ambient)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -211,8 +210,6 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
 
         ambient = self._ambient.detach().cpu().numpy()
-        if ambient.shape[0] == 1 and xyz.shape[0] != 1:
-            ambient = np.repeat(ambient.reshape(1, -1), xyz.shape[0], axis=0)
             
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -296,7 +293,7 @@ class GaussianModel:
             # NEW
             p = group["params"][0]
             # skip non-per-point params
-            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)) or group["name"] == "ambient":
+            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)):
                 optimizable_tensors[group["name"]] = p
                 continue
 
@@ -323,7 +320,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
-        #self._ambient = optimizable_tensors["ambient"]
+        self._ambient = optimizable_tensors["ambient"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -358,12 +355,12 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_ambients, new_scaling, new_rotation):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
-        #"ambient": new_ambient,
+        "ambient": new_ambients,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
 
@@ -372,7 +369,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
-        #self._ambient = optimizable_tensors["ambient"]
+        self._ambient = optimizable_tensors["ambient"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -400,9 +397,9 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        #new_ambient = self._ambient[selected_pts_mask].repeat(N, 1)
+        new_ambient = self._ambient[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_ambient, new_scaling, new_rotation)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -417,11 +414,11 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
-        #new_ambient = self._ambient[selected_pts_mask]
+        new_ambient = self._ambient[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_ambient, new_scaling, new_rotation)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
