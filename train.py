@@ -181,6 +181,23 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
+    try:
+        from diff_surfel_rasterization import _C
+
+        info_bytes = _C.get_lighting_build_info()
+        if torch.is_tensor(info_bytes):
+            info_str = bytes(info_bytes.cpu().tolist()).decode("utf-8", errors="replace")
+        else:
+            # if return is a python string
+            info_str = str(info_bytes)
+
+        with open(os.path.join(args.model_path, "build_info_lighting.txt"), "w", encoding="utf-8") as f:
+            f.write(info_str)
+
+    except Exception as e:
+        with open(os.path.join(args.model_path, "build_info_lighting_ERROR.txt"), "w", encoding="utf-8") as f:
+            f.write(repr(e))
+
     # Create Tensorboard writer
     tb_writer = None
     if TENSORBOARD_FOUND:
