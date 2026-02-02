@@ -1,0 +1,121 @@
+import argparse
+import json
+from pathlib import Path
+
+
+def load_results(results_path: Path):
+    with open(results_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # expected keys: SSIM, PSNR, LPIPS
+    ssim = float(data["SSIM"])
+    psnr = float(data["PSNR"])
+    lpips = float(data["LPIPS"])
+    return ssim, psnr, lpips
+
+
+def minmax(values):
+    vmin = min(values)
+    vmax = max(values)
+    if abs(vmax - vmin) < 1e-12:
+        # all equal -> return 0.5 for everyone to avoid div-by-zero
+        return [0.5 for _ in values], vmin, vmax
+    return [(v - vmin) / (vmax - vmin) for v in values], vmin, vmax
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Compare 2DGS export_iter_* results.json files and rank best->worst."
+    )
+    ap.add_argument(
+        "--root", "-r", required=True,
+        help=r"Root folder to scan (e.g. C:\...\2d-gaussian-splatting\output)"
+    )
+    ap.add_argument(
+        "--pattern", default="results.json",
+        help="Results filename to look for (default: results.json)"
+    )
+    ap.add_argument(
+        "--filter", default="export_iter_",
+        help="Only include results whose parent folder contains this string (default: export_iter_)"
+    )
+    ap.add_argument(
+        "--top", type=int, default=0,
+        help="Show only top N entries (0 = show all)"
+    )
+    args = ap.parse_args()
+
+    root = Path(args.root).expanduser().resolve()
+    if not root.is_dir():
+        raise SystemExit(f"[ERROR] Root does not exist: {root}")
+
+    rows = []
+    for p in root.rglob(args.pattern):
+        if not p.is_file():
+            continue
+        export_dir = p.parent
+        if args.filter and (args.filter not in export_dir.name):
+            continue
+
+        try:
+            ssim, psnr, lp = load_results(p)
+        except Exception as e:
+            print(f"[WARN] Skipping {p} ({e})")
+            continue
+
+        # Identify "where from"
+        run_id = export_dir.parent.name  # e.g. fe7d413a-5
+        export_name = export_dir.name    # e.g. export_iter_15000
+
+        rows.append({
+            "path": str(export_dir),
+            "run": run_id,
+            "export": export_name,
+            "SSIM": ssim,
+            "PSNR": psnr,
+            "LPIPS": lp,
+        })
+
+    if not rows:
+        print("[INFO] No results found. Are your results.json files inside export_iter_* folders?")
+        return 0
+
+    # --- Ranking A: robust lexicographic order (LPIPS best, then SSIM, then PSNR)
+    rows_lexi = sorted(rows, key=lambda r: (r["LPIPS"], -r["SSIM"], -r["PSNR"]))
+
+    # --- Ranking B: combined normalized score (higher better)
+    ssims = [r["SSIM"] for r in rows]
+    psnrs = [r["PSNR"] for r in rows]
+    lpipss = [r["LPIPS"] for r in rows]
+
+    ssim_n, _, _ = minmax(ssims)
+    psnr_n, _, _ = minmax(psnrs)
+    lp_inv_n, _, _ = minmax([-v for v in lpipss])  # invert so higher=better
+
+    for r, a, b, c in zip(rows, ssim_n, psnr_n, lp_inv_n):
+        r["score"] = (a + b + c) / 3.0
+
+    rows_score = sorted(rows, key=lambda r: (-r["score"], r["LPIPS"], -r["SSIM"], -r["PSNR"]))
+
+    # Output
+    topn = args.top if args.top and args.top > 0 else len(rows)
+
+    print("\n=== Ranking (robust): LPIPS asc, then SSIM desc, then PSNR desc ===")
+    for i, r in enumerate(rows_lexi[:topn], start=1):
+        print(
+            f"{i:>3}. LPIPS={r['LPIPS']:.6f}  SSIM={r['SSIM']:.6f}  PSNR={r['PSNR']:.4f}  "
+            f"FROM={r['run']}/{r['export']}  PATH={r['path']}"
+        )
+
+    print("\n=== Ranking (combined score, higher is better; min-max normalized) ===")
+    for i, r in enumerate(rows_score[:topn], start=1):
+        print(
+            f"{i:>3}. SCORE={r['score']:.6f}  (LPIPS={r['LPIPS']:.6f}, SSIM={r['SSIM']:.6f}, PSNR={r['PSNR']:.4f})  "
+            f"FROM={r['run']}/{r['export']}  PATH={r['path']}"
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
