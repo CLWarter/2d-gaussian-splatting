@@ -1,0 +1,82 @@
+from pathlib import Path
+import json
+import os
+from PIL import Image
+
+import torch
+import torchvision.transforms.functional as tf
+from tqdm import tqdm
+
+from utils.loss_utils import ssim
+from utils.image_utils import psnr
+from lpipsPyTorch import lpips
+
+
+def read_images(renders_dir: Path, gt_dir: Path):
+    renders, gts, names = [], [], []
+
+    for fname in sorted(os.listdir(renders_dir)):
+        r = renders_dir / fname
+        g = gt_dir / fname
+        if not g.exists():
+            continue
+
+        render = Image.open(r)
+        gt = Image.open(g)
+
+        renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3].cuda())
+        gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3].cuda())
+        names.append(fname)
+
+    return renders, gts, names
+
+
+def evaluate_export(export_dir: Path):
+    gt_dir = export_dir / "gt"
+    renders_dir = export_dir / "renders"
+
+    if not gt_dir.is_dir() or not renders_dir.is_dir():
+        raise RuntimeError("export_dir must contain gt/ and renders/")
+
+    renders, gts, names = read_images(renders_dir, gt_dir)
+    if not renders:
+        raise RuntimeError("No matching render/gt images found")
+
+    ssims, psnrs, lpipss = [], [], []
+
+    for i in tqdm(range(len(renders)), desc="Evaluating"):
+        ssims.append(ssim(renders[i], gts[i]).item())
+        psnrs.append(psnr(renders[i], gts[i]).item())
+        lpipss.append(lpips(renders[i], gts[i], net_type="vgg").item())
+
+    results = {
+        "SSIM": float(torch.tensor(ssims).mean()),
+        "PSNR": float(torch.tensor(psnrs).mean()),
+        "LPIPS": float(torch.tensor(lpipss).mean()),
+    }
+
+    per_view = {
+        "SSIM": dict(zip(names, ssims)),
+        "PSNR": dict(zip(names, psnrs)),
+        "LPIPS": dict(zip(names, lpipss)),
+    }
+
+    with open(export_dir / "results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    with open(export_dir / "per_view.json", "w") as f:
+        json.dump(per_view, f, indent=2)
+
+    print("\nExport:", export_dir)
+    print(f"  SSIM : {results['SSIM']:.7f}")
+    print(f"  PSNR : {results['PSNR']:.7f}")
+    print(f"  LPIPS: {results['LPIPS']:.7f}\n")
+
+
+if __name__ == "__main__":
+    torch.cuda.set_device(torch.device("cuda:0"))
+
+    export_dir = Path(
+        r"C:\Users\cwart\Projects\2d-gaussian-splatting\output\OutsideScored\export_iter_10000"
+    )
+
+    evaluate_export(export_dir)

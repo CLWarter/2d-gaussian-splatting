@@ -1,0 +1,151 @@
+import argparse
+import os
+import json
+from pathlib import Path
+from PIL import Image
+
+import torch
+import torchvision.transforms.functional as tf
+from tqdm import tqdm
+
+from utils.loss_utils import ssim
+from utils.image_utils import psnr
+from lpipsPyTorch import lpips
+
+
+def read_images(renders_dir: Path, gt_dir: Path):
+    renders, gts, names = [], [], []
+    # deterministic order helps reproducibility
+    for fname in sorted(os.listdir(renders_dir)):
+        rp = renders_dir / fname
+        gp = gt_dir / fname
+        if not gp.exists():
+            # Skip renders with missing GT match
+            continue
+
+        render = Image.open(rp)
+        gt = Image.open(gp)
+
+        # drop alpha if present
+        renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
+        gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3, :, :].cuda())
+        names.append(fname)
+
+    return renders, gts, names
+
+
+def evaluate_export(export_dir: Path, results_name="results.json", per_view_name="per_view.json"):
+    gt_dir = export_dir / "gt"
+    renders_dir = export_dir / "renders"
+
+    if not gt_dir.is_dir() or not renders_dir.is_dir():
+        raise FileNotFoundError(f"Missing gt/ or renders/ in {export_dir}")
+
+    renders, gts, image_names = read_images(renders_dir, gt_dir)
+    if not renders:
+        raise RuntimeError(f"No matching render/gt filenames found in {export_dir}")
+
+    ssims, psnrs, lpipss = [], [], []
+
+    for i in tqdm(range(len(renders)), desc=f"Metrics: {export_dir.name}"):
+        ssims.append(ssim(renders[i], gts[i]).item())
+        psnrs.append(psnr(renders[i], gts[i]).item())
+        lpipss.append(lpips(renders[i], gts[i], net_type="vgg").item())
+
+    mean_ssim = float(torch.tensor(ssims).mean().item())
+    mean_psnr = float(torch.tensor(psnrs).mean().item())
+    mean_lpips = float(torch.tensor(lpipss).mean().item())
+
+    print(f"\nExport: {export_dir}")
+    print(f"  SSIM : {mean_ssim:>12.7f}")
+    print(f"  PSNR : {mean_psnr:>12.7f}")
+    print(f"  LPIPS: {mean_lpips:>12.7f}\n")
+
+    results = {"SSIM": mean_ssim, "PSNR": mean_psnr, "LPIPS": mean_lpips}
+    per_view = {
+        "SSIM": {n: v for n, v in zip(image_names, ssims)},
+        "PSNR": {n: v for n, v in zip(image_names, psnrs)},
+        "LPIPS": {n: v for n, v in zip(image_names, lpipss)},
+    }
+
+    with open(export_dir / results_name, "w") as f:
+        json.dump(results, f, indent=2)
+    with open(export_dir / per_view_name, "w") as f:
+        json.dump(per_view, f, indent=2)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Evaluate 2DGS export_iter_* folders directly (gt/ vs renders/), one export folder at a time."
+    )
+    ap.add_argument(
+        "--root", "-r", required=True,
+        help="Folder containing many run folders (e.g. .../2d-gaussian-splatting/output)"
+    )
+    ap.add_argument(
+        "--pattern", default="export_iter_*",
+        help="Export folder glob pattern inside each run folder (default: export_iter_*)"
+    )
+    ap.add_argument(
+        "--recursive", action="store_true",
+        help="Search for run folders recursively under root (default: only direct children)."
+    )
+    ap.add_argument(
+        "--continue_on_error", action="store_true",
+        help="Keep going even if one export folder fails."
+    )
+    ap.add_argument(
+        "--skip_existing", action="store_true",
+        help="Skip export folders that already contain results.json."
+    )
+    args = ap.parse_args()
+
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+
+    root = Path(args.root).expanduser().resolve()
+    if not root.is_dir():
+        raise SystemExit(f"[ERROR] Root does not exist: {root}")
+
+    search_dirs = root.rglob("*") if args.recursive else root.iterdir()
+
+    export_dirs = []
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        for exp in d.glob(args.pattern):
+            if (exp / "gt").is_dir() and (exp / "renders").is_dir():
+                if args.skip_existing and (exp / "results.json").exists():
+                    continue
+                export_dirs.append(exp)
+
+    export_dirs.sort(key=lambda p: str(p).lower())
+
+    if not export_dirs:
+        print("[INFO] No export folders found with gt/ and renders/.")
+        return 0
+
+    print(f"[INFO] Found {len(export_dirs)} export folders to evaluate.\n")
+
+    failed = 0
+    for i, exp_dir in enumerate(export_dirs, start=1):
+        print(f"=== [{i}/{len(export_dirs)}] {exp_dir} ===")
+        try:
+            evaluate_export(exp_dir)
+            print(f"[OK] Wrote results.json + per_view.json in {exp_dir}\n")
+        except Exception as e:
+            failed += 1
+            print(f"[ERROR] Failed: {exp_dir}\n  -> {e}\n")
+            if not args.continue_on_error:
+                break
+
+    if failed:
+        print(f"[DONE] Completed with {failed} failure(s).")
+        return 1
+
+    print("[DONE] All evaluations finished successfully.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -43,13 +43,15 @@ class GaussianModel:
 
     def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
-        self.max_sh_degree = 0  
+        self.max_sh_degree = 0
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        self._ambient = torch.empty(0)
+        self._kspecular = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -67,6 +69,8 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._opacity,
+            self._ambient,
+            self._kspecular,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
@@ -82,6 +86,8 @@ class GaussianModel:
         self._scaling, 
         self._rotation, 
         self._opacity,
+        self._ambient,
+        self._kspecular,
         self.max_radii2D, 
         xyz_gradient_accum, 
         denom,
@@ -114,6 +120,14 @@ class GaussianModel:
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
     
+    @property
+    def get_ambient(self):
+        return self.opacity_activation(self._ambient)
+    
+    @property
+    def get_kspecular(self):
+        return torch.sigmoid(self._kspecular)
+    
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
 
@@ -137,12 +151,20 @@ class GaussianModel:
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
+        ambient = self.inverse_opacity_activation(
+            0.05 * torch.ones((1, 1), dtype=torch.float, device="cuda")
+        )
+
+        kspecular = self.inverse_opacity_activation(0.10 * torch.ones((1, 1), dtype=torch.float, device="cuda"))
+
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self._ambient = nn.Parameter(ambient.requires_grad_(True))
+        self._kspecular = nn.Parameter(kspecular.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -155,6 +177,8 @@ class GaussianModel:
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._ambient], 'lr': training_args.ambient_lr, "name": "ambient"},
+            {'params': [self._kspecular], 'lr': training_args.kspecular_lr, "name": "kspecular"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
@@ -181,6 +205,8 @@ class GaussianModel:
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
             l.append('f_rest_{}'.format(i))
         l.append('opacity')
+        l.append('ambient')
+        l.append('kspecular')
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
@@ -195,13 +221,22 @@ class GaussianModel:
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
+
+        ambient = self._ambient.detach().cpu().numpy()
+        if ambient.shape[0] == 1 and xyz.shape[0] != 1:
+            ambient = np.repeat(ambient.reshape(1, -1), xyz.shape[0], axis=0)
+
+        kspecular = self._kspecular.detach().cpu().numpy()
+        if kspecular.shape[0] == 1 and xyz.shape[0] != 1:
+            kspecular = np.repeat(kspecular.reshape(1, -1), xyz.shape[0], axis=0)
+
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, ambient, kspecular, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -218,6 +253,8 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        ambient = np.asarray(plydata.elements[0]["ambient"])[..., np.newaxis]
+        kspecular = np.asarray(plydata.elements[0]["kspecular"])[..., np.newaxis]
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -249,6 +286,8 @@ class GaussianModel:
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._ambient = nn.Parameter(torch.tensor(ambient, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._kspecular = nn.Parameter(torch.tensor(kspecular, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
@@ -272,6 +311,13 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            # NEW
+            p = group["params"][0]
+            # skip non-per-point params
+            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)) or group["name"] in ["ambient", "kspecular"]:
+                optimizable_tensors[group["name"]] = p
+                continue
+
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -295,6 +341,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
+        #self._ambient = optimizable_tensors["ambient"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -307,6 +354,10 @@ class GaussianModel:
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             assert len(group["params"]) == 1
+             # NEW: skip groups that are not per-point
+            if group["name"] not in tensors_dict:
+                optimizable_tensors[group["name"]] = group["params"][0]
+                continue
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -330,6 +381,7 @@ class GaussianModel:
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
+        #"ambient": new_ambient,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
 
@@ -338,6 +390,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
+        #self._ambient = optimizable_tensors["ambient"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -365,6 +418,7 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        #new_ambient = self._ambient[selected_pts_mask].repeat(N, 1)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
 
@@ -381,6 +435,7 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
+        #new_ambient = self._ambient[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
