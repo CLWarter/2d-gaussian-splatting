@@ -22,11 +22,27 @@ from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import json
+from diff_surfel_rasterization import _C
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+def load_lighting_cfg(path: str) -> dict:
+    if not path:
+        return {}
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"lighting cfg json not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_lighting_cfg(model_path: str, cfg: dict):
+    os.makedirs(model_path, exist_ok=True)
+    with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg or {}, f, indent=2, sort_keys=True)
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
@@ -144,7 +160,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
             # NEW: ambient
-            ambient = 0.10 if iteration < 10000 else 0.20
+            #ambient = 0.10 if iteration < 10000 else 0.20
 
         with torch.no_grad():        
             if network_gui.conn == None:
@@ -170,6 +186,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # raise e
                     network_gui.conn = None
 
+def save_lighting_cfg(model_path: str, cfg: dict):
+    with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, sort_keys=True)
+
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
@@ -181,6 +201,7 @@ def prepare_output_and_logger(args):
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
+
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
@@ -201,12 +222,30 @@ def prepare_output_and_logger(args):
         with open(os.path.join(args.model_path, "build_info_lighting_ERROR.txt"), "w", encoding="utf-8") as f:
             f.write(repr(e))
 
+    # ---------------- Lighting config ----------------
+    lighting_cfg = getattr(args, "lighting_cfg_dict", {})
+    write_lighting_cfg_json(args.model_path, lighting_cfg)
+
+    lighting_cfg = getattr(args, "lighting_cfg_dict", {}) or {}
+    save_lighting_cfg(args.model_path, lighting_cfg)
+
+    # Upload once to CUDA constant memory
+    try:
+        from diff_surfel_rasterization import _C, pack_lighting_cfg
+        t = pack_lighting_cfg(lighting_cfg, device="cpu").contiguous()
+        _C.set_lighting_config(t)
+        torch.cuda.synchronize()
+        print("[lighting] upload synchronized OK")
+    except Exception as e:
+        print(f"[train] lighting cfg upload failed: {e}")
+
     # Create Tensorboard writer
     tb_writer = None
     if TENSORBOARD_FOUND:
         tb_writer = SummaryWriter(args.model_path)
     else:
         print("Tensorboard not available: not logging progress")
+
     return tb_writer
 
 @torch.no_grad()
@@ -269,6 +308,18 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
         torch.cuda.empty_cache()
 
+def load_lighting_cfg(path: str) -> dict:
+    if not path:
+        return {}
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Lighting config not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+def write_lighting_cfg_json(model_path: str, lighting_cfg: dict):
+    with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
+        json.dump(lighting_cfg, f, indent=2, sort_keys=True)
+
 if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
@@ -283,7 +334,11 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument(
+    "--lighting_cfg", type=str, default="", help="Path to lighting config JSON (cfg_lighting.json)")
     args = parser.parse_args(sys.argv[1:])
+
+    args.lighting_cfg_dict = load_lighting_cfg(args.lighting_cfg) if args.lighting_cfg else {}
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
@@ -294,6 +349,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
 
     # All done

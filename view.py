@@ -5,6 +5,20 @@ from arguments import ModelParams, PipelineParams
 from gaussian_renderer import render, network_gui
 from utils.image_utils import render_net_image
 import torch
+import json, os
+
+def load_lighting_cfg_for_model(model_path: str, override_path: str = ""):
+    # Viewer rule (recommended):
+    # 1) override_path if set
+    # 2) else model_path/cfg_lighting.json if present
+    if override_path:
+        with open(override_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    candidate = os.path.join(model_path, "cfg_lighting.json")
+    if os.path.isfile(candidate):
+        with open(candidate, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
 def view(dataset, pipe, iteration):
     gaussians = GaussianModel(dataset.sh_degree)
@@ -45,9 +59,31 @@ if __name__ == "__main__":
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--iteration', type=int, default=30000)
+    parser.add_argument('--lighting_cfg', type=str, default="",
+                        help="Optional lighting cfg JSON override. If empty, uses <model_path>/cfg_lighting.json")
     args = parser.parse_args(sys.argv[1:])
     print("View: " + args.model_path)
     network_gui.init(args.ip, args.port)
+
+    try:
+        from diff_surfel_rasterization import _C
+        from utils.lighting_config import pack_lighting_cfg
+
+        cfg = {}
+
+        if args.lighting_cfg:
+            with open(args.lighting_cfg, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        else:
+            cfg_path = os.path.join(args.model_path, "cfg_lighting.json")
+            if os.path.isfile(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+
+        _C.set_lighting_config(pack_lighting_cfg(cfg))
+
+    except Exception as e:
+        print(f"[viewer] lighting cfg upload failed: {e}")
     
     view(lp.extract(args), pp.extract(args), args.iteration)
 

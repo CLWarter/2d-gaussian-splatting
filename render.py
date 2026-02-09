@@ -42,6 +42,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_cluster", default=50, type=int, help='Mesh: number of connected clusters to export')
     parser.add_argument("--unbounded", action="store_true", help='Mesh: using unbounded mode for meshing')
     parser.add_argument("--mesh_res", default=1024, type=int, help='Mesh: resolution for unbounded mesh extraction')
+    parser.add_argument("--lighting_cfg", type=str, default="", help="Path to cfg_lighting.json")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
