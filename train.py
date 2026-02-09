@@ -24,6 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import json
 from diff_surfel_rasterization import _C
+from utils.lighting_config import load_json, pack_lighting_cfg, save_cfg
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -183,45 +184,48 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # raise e
                     network_gui.conn = None
 
-def prepare_output_and_logger(args):    
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
-            unique_str=os.getenv('OAR_JOB_ID')
+            unique_str = os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
-        
+
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
-    os.makedirs(args.model_path, exist_ok = True)
+    os.makedirs(args.model_path, exist_ok=True)
 
-    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+    # Save cli args
+    with open(os.path.join(args.model_path, "cfg_args"), "w", encoding="utf-8") as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
+    # Save build info (debug)
     try:
         from diff_surfel_rasterization import _C
-
         info_bytes = _C.get_lighting_build_info()
         if torch.is_tensor(info_bytes):
             info_str = bytes(info_bytes.cpu().tolist()).decode("utf-8", errors="replace")
         else:
-            # if return is a python string
             info_str = str(info_bytes)
 
         with open(os.path.join(args.model_path, "build_info_lighting.txt"), "w", encoding="utf-8") as f:
             f.write(info_str)
-
     except Exception as e:
         with open(os.path.join(args.model_path, "build_info_lighting_ERROR.txt"), "w", encoding="utf-8") as f:
             f.write(repr(e))
 
     # ---------------- Lighting config ----------------
     lighting_cfg = getattr(args, "lighting_cfg_dict", {}) or {}
-    save_lighting_cfg(args.model_path, lighting_cfg)
+
+    # Save the runtime lighting config next to cfg_args
+    with open(os.path.join(args.model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
+        json.dump(lighting_cfg, f, indent=2, sort_keys=True)
 
     # Upload once to CUDA constant memory
     try:
-        from diff_surfel_rasterization import _C, pack_lighting_cfg
+        from diff_surfel_rasterization import _C
+        from lighting_config import pack_lighting_cfg  # <- your python helper module
         t = pack_lighting_cfg(lighting_cfg, device="cpu").contiguous()
         _C.set_lighting_config(t)
         torch.cuda.synchronize()

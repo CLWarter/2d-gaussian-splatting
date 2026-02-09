@@ -1,3 +1,6 @@
+import json
+import os
+from typing import Dict, Any, Optional
 import torch
 
 CFG_LEN = 16
@@ -27,10 +30,29 @@ _KEYS = [
     "spec_gating", "energy_comp", "use_spot", "spot_inner_deg", "spot_outer_deg", "spot_exp"
 ]
 
-def pack_lighting_cfg(cfg: dict) -> torch.Tensor:
-    merged = dict(_DEFAULTS)
+def load_json(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def normalize_cfg(cfg: dict) -> dict:
+    out = copy.deepcopy(_DEFAULTS)
     if cfg:
-        merged.update(cfg)
-    vals16 = [float(merged[k]) for k in _KEYS]
-    assert len(vals16) == CFG_LEN
-    return torch.tensor(vals16, dtype=torch.float32, device="cpu").contiguous()
+        out.update(cfg)
+    return out
+
+def pack_lighting_cfg(cfg: dict, device="cpu") -> torch.Tensor:
+    c = normalize_cfg(cfg)
+    vals16 = [float(c[k]) for k in _KEYS]
+    return torch.tensor(vals16, dtype=torch.float32, device=device).contiguous()
+
+def resolve_cfg_path(model_path: str, override_path: str) -> str:
+    if override_path:
+        return override_path
+    return os.path.join(model_path, "cfg_lighting.json")
+
+def save_cfg(model_path: str, cfg: dict):
+    os.makedirs(model_path, exist_ok=True)
+    path = os.path.join(model_path, "cfg_lighting.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(merged_cfg(cfg), f, indent=2, sort_keys=True)
+    return path

@@ -8,17 +8,13 @@ import torch
 import json, os
 
 def load_lighting_cfg_for_model(model_path: str, override_path: str = ""):
-    # Viewer rule (recommended):
-    # 1) override_path if set
-    # 2) else model_path/cfg_lighting.json if present
-    if override_path:
-        with open(override_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    candidate = os.path.join(model_path, "cfg_lighting.json")
-    if os.path.isfile(candidate):
-        with open(candidate, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    cfg_path = args.lighting_cfg if args.lighting_cfg else os.path.join(args.model_path, "cfg_lighting.json")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        lighting_cfg = json.load(f)
+    t = pack_lighting_cfg(lighting_cfg, device="cpu")
+    _C.set_lighting_config(t)
+    torch.cuda.synchronize()
+    print(f"[viewer] lighting cfg uploaded from {cfg_path}")
 
 def view(dataset, pipe, iteration):
     gaussians = GaussianModel(dataset.sh_degree)
@@ -65,21 +61,15 @@ if __name__ == "__main__":
 
     try:
         from diff_surfel_rasterization import _C
-        from utils.lighting_config import pack_lighting_cfg
+        from utils.lighting_config import load_json, pack_lighting_cfg, resolve_cfg_path
 
-        cfg = {}
+        cfg_path = resolve_cfg_path(args.model_path, args.lighting_cfg)
+        lighting_cfg = load_json(cfg_path) if cfg_path and os.path.isfile(cfg_path) else {}
 
-        if args.lighting_cfg:
-            with open(args.lighting_cfg, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        else:
-            cfg_path = os.path.join(args.model_path, "cfg_lighting.json")
-            if os.path.isfile(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-
-        _C.set_lighting_config(pack_lighting_cfg(cfg))
-
+        t = pack_lighting_cfg(lighting_cfg, device="cpu")
+        _C.set_lighting_config(t)
+        torch.cuda.synchronize()
+        print(f"[viewer] lighting cfg uploaded from: {cfg_path}")
     except Exception as e:
         print(f"[viewer] lighting cfg upload failed: {e}")
     
