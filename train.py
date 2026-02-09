@@ -159,18 +159,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-            # NEW: ambient
-            #ambient = 0.10 if iteration < 10000 else 0.20
-
-        with torch.no_grad():        
-            if network_gui.conn == None:
+        with torch.no_grad():
+            if network_gui.conn is None:   
                 network_gui.try_connect(dataset.render_items)
-            while network_gui.conn != None:
+
+            if network_gui.conn is not None:
                 try:
                     net_image_bytes = None
                     custom_cam, do_training, keep_alive, scaling_modifer, render_mode = network_gui.receive()
-                    if custom_cam != None:
-                        render_pkg = render(custom_cam, gaussians, pipe, background, ambient, scaling_modifer)   
+                    if custom_cam is not None:
+                        render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifer)   
                         net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)
                         net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                     metrics_dict = {
@@ -180,15 +178,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     }
                     # Send the data
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
-                    if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                        break
+
                 except Exception as e:
                     # raise e
                     network_gui.conn = None
-
-def save_lighting_cfg(model_path: str, cfg: dict):
-    with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, sort_keys=True)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -223,9 +216,6 @@ def prepare_output_and_logger(args):
             f.write(repr(e))
 
     # ---------------- Lighting config ----------------
-    lighting_cfg = getattr(args, "lighting_cfg_dict", {})
-    write_lighting_cfg_json(args.model_path, lighting_cfg)
-
     lighting_cfg = getattr(args, "lighting_cfg_dict", {}) or {}
     save_lighting_cfg(args.model_path, lighting_cfg)
 
@@ -307,18 +297,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
         torch.cuda.empty_cache()
-
-def load_lighting_cfg(path: str) -> dict:
-    if not path:
-        return {}
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"Lighting config not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-    
-def write_lighting_cfg_json(model_path: str, lighting_cfg: dict):
-    with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
-        json.dump(lighting_cfg, f, indent=2, sort_keys=True)
 
 if __name__ == "__main__":
     # Set up command line argument parser

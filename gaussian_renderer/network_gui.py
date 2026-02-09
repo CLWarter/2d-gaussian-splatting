@@ -47,18 +47,38 @@ def try_connect(render_items):
     try:
         conn, addr = listener.accept()
         # print(f"\nConnected by {addr}")
-        conn.settimeout(None)
+        conn.settimeout(0.0)
         send_json_data(conn, render_items)
     except Exception as inst:
         pass
         # raise inst
             
+def _recv_exact(n: int):
+    """Receive exactly n bytes or return None if no data (non-blocking)."""
+    global conn
+    data = b""
+    while len(data) < n:
+        try:
+            chunk = conn.recv(n - len(data))
+        except (BlockingIOError, socket.timeout):
+            return None  # no data available right now
+        if chunk == b"":
+            # disconnected
+            raise ConnectionError("GUI disconnected")
+        data += chunk
+    return data
+
 def read():
     global conn
-    messageLength = conn.recv(4)
-    messageLength = int.from_bytes(messageLength, 'little')
-    message = conn.recv(messageLength)
-    return json.loads(message.decode("utf-8"))
+    # try read header
+    hdr = _recv_exact(4)
+    if hdr is None:
+        return None
+    messageLength = int.from_bytes(hdr, 'little')
+    body = _recv_exact(messageLength)
+    if body is None:
+        return None
+    return json.loads(body.decode("utf-8"))
 
 def send(message_bytes, verify, metrics):
     global conn
@@ -69,30 +89,40 @@ def send(message_bytes, verify, metrics):
     send_json_data(conn, metrics)
 
 def receive():
-    message = read()
-    width = message["resolution_x"]
-    height = message["resolution_y"]
+    global conn
+    try:
+        message = read()
+        if message is None:
+            # No GUI message available (non-blocking)
+            return None, True, True, 1.0, 0
 
-    if width != 0 and height != 0:
-        try:
-            do_training = bool(message["train"])
+        width = message["resolution_x"]
+        height = message["resolution_y"]
+
+        if width != 0 and height != 0:
+            do_training = bool(message.get("train", True))
             fovy = message["fov_y"]
             fovx = message["fov_x"]
             znear = message["z_near"]
             zfar = message["z_far"]
-            keep_alive = bool(message["keep_alive"])
-            scaling_modifier = message["scaling_modifier"]
+            keep_alive = bool(message.get("keep_alive", True))
+            scaling_modifier = message.get("scaling_modifier", 1.0)
+
             world_view_transform = torch.reshape(torch.tensor(message["view_matrix"]), (4, 4)).cuda()
             world_view_transform[:,1] = -world_view_transform[:,1]
             world_view_transform[:,2] = -world_view_transform[:,2]
+
             full_proj_transform = torch.reshape(torch.tensor(message["view_projection_matrix"]), (4, 4)).cuda()
             full_proj_transform[:,1] = -full_proj_transform[:,1]
-            custom_cam = MiniCam(width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform)
-            render_mode = message["render_mode"]
-        except Exception as e:
-            print("")
-            traceback.print_exc()
-            # raise e
-        return custom_cam, do_training, keep_alive, scaling_modifier, render_mode
-    else:
-        return None, None, None, None, None
+
+            custom_cam = MiniCam(width, height, fovy, fovx, znear, zfar,
+                                 world_view_transform, full_proj_transform)
+            render_mode = message.get("render_mode", 0)
+            return custom_cam, do_training, keep_alive, scaling_modifier, render_mode
+
+        return None, True, True, 1.0, 0
+
+    except Exception:
+        # Any error -> drop connection so training continues
+        conn = None
+        return None, True, True, 1.0, 0
