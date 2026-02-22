@@ -157,9 +157,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         render_pkg = render(custom_cam, gaussians, pipe, background, ambient, scaling_modifer)   
                         net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)
                         net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+                    
+                    SHINY_MIN = 2.0
+                    SHINY_MAX = 128.0
+
+                    t = torch.sigmoid(gaussians._shiny).view(-1)[0].item()     # normalized 0..1
+                    shininess = SHINY_MIN + (SHINY_MAX - SHINY_MIN) * t        # exponent used by shader
+                    
                     metrics_dict = {
-                        "#": gaussians.get_opacity.shape[0],
-                        "loss": ema_loss_for_log
+                        "#": int(gaussians.get_xyz.shape[0]),
+                        "loss": ema_loss_for_log,
+                        "Ambient": float(gaussians.get_ambient.view(-1)[0].item()),
+                        "KSpec":   float(gaussians.get_kspecular.view(-1)[0].item()),
+                        "Shiny":   float(shininess),
                         # Add more metrics as needed
                     }
                     # Send the data
