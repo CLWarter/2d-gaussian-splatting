@@ -2,6 +2,7 @@ import json
 import os
 from typing import Dict, Any, Optional
 import torch
+import copy
 
 CFG_LEN = 16
 
@@ -54,5 +55,5 @@ def save_cfg(model_path: str, cfg: dict):
     os.makedirs(model_path, exist_ok=True)
     path = os.path.join(model_path, "cfg_lighting.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(merged_cfg(cfg), f, indent=2, sort_keys=True)
+        json.dump(normalize_cfg(cfg), f, indent=2, sort_keys=True)
     return path

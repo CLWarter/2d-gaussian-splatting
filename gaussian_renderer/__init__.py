@@ -117,7 +117,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "radii": radii,
     }
 
-
     # additional regularizations
     render_alpha = allmap[1:2]
 
@@ -149,7 +148,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     surf_normal = surf_normal.permute(2,0,1)
     # remember to multiply with accum_alpha since render_normal is unnormalized.
     surf_normal = surf_normal * (render_alpha).detach()
-
 
     rets.update({
             'rend_alpha': render_alpha,

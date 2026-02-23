@@ -225,7 +225,7 @@ def prepare_output_and_logger(args):
     # Upload once to CUDA constant memory
     try:
         from diff_surfel_rasterization import _C
-        from lighting_config import pack_lighting_cfg  # <- your python helper module
+        from utils.lighting_config import pack_lighting_cfg  # <- your python helper module
         t = pack_lighting_cfg(lighting_cfg, device="cpu").contiguous()
         _C.set_lighting_config(t)
         torch.cuda.synchronize()
