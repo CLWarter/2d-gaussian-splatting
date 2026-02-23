@@ -143,9 +143,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-            # NEW: ambient
-            ambient = 0.10 if iteration < 10000 else 0.20
-
         with torch.no_grad():        
             if network_gui.conn == None:
                 network_gui.try_connect(dataset.render_items)
@@ -154,7 +151,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     net_image_bytes = None
                     custom_cam, do_training, keep_alive, scaling_modifer, render_mode = network_gui.receive()
                     if custom_cam != None:
-                        render_pkg = render(custom_cam, gaussians, pipe, background, ambient, scaling_modifer)   
+                        render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer)   
                         net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)
                         net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                     
@@ -164,13 +161,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     t = torch.sigmoid(gaussians._shiny).view(-1)[0].item()     # normalized 0..1
                     shininess = SHINY_MIN + (SHINY_MAX - SHINY_MIN) * t        # exponent used by shader
                     
+                    viewer_metrics = gaussians.get_viewer_metrics()
                     metrics_dict = {
                         "#": int(gaussians.get_xyz.shape[0]),
-                        "loss": ema_loss_for_log,
-                        "Ambient": float(gaussians.get_ambient.view(-1)[0].item()),
-                        "KSpec":   float(gaussians.get_kspecular.view(-1)[0].item()),
-                        "Shiny":   float(shininess),
-                        # Add more metrics as needed
+                        "loss": float(ema_loss_for_log),
+
+                        # viewer/debug
+                        #"A_raw": viewer_metrics["A_raw"],
+                        "A_eff": viewer_metrics["A_eff"],
+                        #"Ks_raw": viewer_metrics["Ks_raw"],
+                        "Ks_eff": viewer_metrics["Ks_eff"],
+                        #"Sh_raw": viewer_metrics["Sh_raw"],
+                        "Sh_eff": viewer_metrics["Sh_eff"],
+                        #"ParamsFinite": viewer_metrics["ParamsFinite"],
                     }
                     # Send the data
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)

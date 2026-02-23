@@ -123,17 +123,70 @@ class GaussianModel:
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
     
+    AMBIENT_MAX = 0.25
+    SHINY_MIN = 2.0
+    SHINY_MAX = 128.0
+    @property
+    def get_ambient_raw(self):
+        """Raw learnable ambient parameter (logit). Shape e.g. [1,1]."""
+        return self._ambient
+
     @property
     def get_ambient(self):
-        return self.opacity_activation(self._ambient)
-    
+        """Effective ambient used by CUDA (after sigmoid and cap)."""
+        # CUDA: a = AMBIENT_MAX * sigmoid(raw)
+        return self.AMBIENT_MAX * torch.sigmoid(self._ambient)
+
+    @property
+    def get_kspecular_raw(self):
+        """Raw learnable kspec parameter (logit)."""
+        return self._kspecular
+
     @property
     def get_kspecular(self):
+        """Effective kspec used by CUDA (after sigmoid)."""
+        # If you later cap it, do: return KS_MAX * torch.sigmoid(self._kspecular)
         return torch.sigmoid(self._kspecular)
-    
+
+    @property
+    def get_shiny_raw(self):
+        """Raw learnable shininess parameter (logit)."""
+        return self._shiny
+
     @property
     def get_shiny(self):
-        return torch.sigmoid(self._shiny)
+        """Effective shininess exponent used by CUDA (mapped to [SHINY_MIN, SHINY_MAX])."""
+        t = torch.sigmoid(self._shiny)
+        return self.SHINY_MIN + (self.SHINY_MAX - self.SHINY_MIN) * t
+
+    def get_viewer_metrics(self):
+        """Convenience: returns scalars for viewer/debug (raw + effective)."""
+        # Always use .view(-1)[0].item() so shape doesn't matter
+        rawA = float(self.get_ambient_raw.view(-1)[0].item())
+        effA = float(self.get_ambient.view(-1)[0].item())
+
+        rawKs = float(self.get_kspecular_raw.view(-1)[0].item())
+        effKs = float(self.get_kspecular.view(-1)[0].item())
+
+        rawSh = float(self.get_shiny_raw.view(-1)[0].item())
+        effSh = float(self.get_shiny.view(-1)[0].item())
+
+        # Optional: also report if anything went non-finite
+        finite = (
+            torch.isfinite(self.get_ambient).all()
+            and torch.isfinite(self.get_kspecular).all()
+            and torch.isfinite(self.get_shiny).all()
+        )
+
+        return {
+            "A_raw": rawA,
+            "A_eff": effA,
+            "Ks_raw": rawKs,
+            "Ks_eff": effKs,
+            "Sh_raw": rawSh,
+            "Sh_eff": effSh,
+            "ParamsFinite": bool(finite),
+        }
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
@@ -158,8 +211,12 @@ class GaussianModel:
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        ambient = self.inverse_opacity_activation(
-            0.05 * torch.ones((1, 1), dtype=torch.float, device="cuda")
+        amax = 0.25
+        a0 = 0.02
+        t0 = a0 / amax  # must be in (0,1)
+
+        ambient = torch.nn.Parameter(
+            self.inverse_opacity_activation(torch.tensor([[t0]], device="cuda", dtype=torch.float32))
         )
 
         kspecular = self.inverse_opacity_activation(0.10 * torch.ones((1, 1), dtype=torch.float, device="cuda"))
