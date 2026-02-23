@@ -220,7 +220,7 @@ class GaussianModel:
             self.inverse_opacity_activation(torch.tensor([[t0]], device="cuda", dtype=torch.float32))
         )
 
-        kspecular = self.inverse_opacity_activation(0.10 * torch.ones((1, 1), dtype=torch.float, device="cuda"))
+        kspecular = self.inverse_opacity_activation(0.10 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
         shiny = self.inverse_opacity_activation(0.10 * torch.ones((1, 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -389,7 +389,7 @@ class GaussianModel:
             # NEW
             p = group["params"][0]
             # skip non-per-point params
-            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)) or group["name"] in ["ambient", "kspecular", "shiny"]:
+            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)) or group["name"] in ["ambient", "shiny"]:
                 optimizable_tensors[group["name"]] = p
                 continue
 
@@ -417,6 +417,8 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._ambient = optimizable_tensors["ambient"]
+        self._kspecular = optimizable_tensors["kspecular"]
+        self._shiny = optimizable_tensors["shiny"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -451,12 +453,14 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_ambients, new_scaling, new_rotation):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_kspecular, new_scaling, new_rotation):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
-        "ambient": new_ambients,
+        #"ambient": new_ambients,
+        "kspecular": new_kspecular,
+        #"shiny": new_shiny,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
 
@@ -466,6 +470,8 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._ambient = optimizable_tensors["ambient"]
+        self._kspecular = optimizable_tensors["kspecular"]
+        self._shiny = optimizable_tensors["shiny"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -493,9 +499,11 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        new_ambient = self._ambient[selected_pts_mask].repeat(N, 1)
+        #new_ambient = self._ambient[selected_pts_mask].repeat(N, 1)
+        new_kspecular = self._kspecular[selected_pts_mask].repeat(N, 1)
+        #new_shiny = self._shiny[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_ambient, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_kspecular, new_scaling, new_rotation)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -510,11 +518,13 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
-        new_ambient = self._ambient[selected_pts_mask]
+        #new_ambient = self._ambient[selected_pts_mask]
+        new_kspecular = self._kspecular[selected_pts_mask]
+        #new_shiny = self._shiny[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_ambient, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_kspecular, new_scaling, new_rotation)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
