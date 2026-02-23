@@ -151,13 +151,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     net_image_bytes = None
                     custom_cam, do_training, keep_alive, scaling_modifer, render_mode = network_gui.receive()
                     if custom_cam != None:
-                        render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifer)   
+                        render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer)   
                         net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)
                         net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+                    
+                    SHINY_MIN = 2.0
+                    SHINY_MAX = 128.0
+
+                    t = torch.sigmoid(gaussians._shiny).view(-1)[0].item()     # normalized 0..1
+                    shininess = SHINY_MIN + (SHINY_MAX - SHINY_MIN) * t        # exponent used by shader
+                    
+                    viewer_metrics = gaussians.get_viewer_metrics()
                     metrics_dict = {
-                        "#": gaussians.get_opacity.shape[0],
-                        "loss": ema_loss_for_log
-                        # Add more metrics as needed
+                        "#": int(gaussians.get_xyz.shape[0]),
+                        "loss": float(ema_loss_for_log),
+
+                        # viewer/debug
+                        #"A_raw": viewer_metrics["A_raw"],
+                        "A_eff": viewer_metrics["A_eff"],
+                        #"Ks_raw": viewer_metrics["Ks_raw"],
+                        "Ks_eff": viewer_metrics["Ks_eff"],
+                        #"Sh_raw": viewer_metrics["Sh_raw"],
+                        "Sh_eff": viewer_metrics["Sh_eff"],
+                        #"ParamsFinite": viewer_metrics["ParamsFinite"],
                     }
                     # Send the data
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
@@ -180,6 +196,23 @@ def prepare_output_and_logger(args):
     os.makedirs(args.model_path, exist_ok = True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
+
+    try:
+        from diff_surfel_rasterization import _C
+
+        info_bytes = _C.get_lighting_build_info()
+        if torch.is_tensor(info_bytes):
+            info_str = bytes(info_bytes.cpu().tolist()).decode("utf-8", errors="replace")
+        else:
+            # if return is a python string
+            info_str = str(info_bytes)
+
+        with open(os.path.join(args.model_path, "build_info_lighting.txt"), "w", encoding="utf-8") as f:
+            f.write(info_str)
+
+    except Exception as e:
+        with open(os.path.join(args.model_path, "build_info_lighting_ERROR.txt"), "w", encoding="utf-8") as f:
+            f.write(repr(e))
 
     # Create Tensorboard writer
     tb_writer = None
