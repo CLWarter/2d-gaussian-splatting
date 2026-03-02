@@ -37,6 +37,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+    
+    vis_ema = torch.zeros((gaussians.get_xyz.shape[0],), device="cuda", dtype=torch.float32)
+    vis_decay = 0.995  # ~200 iters memory
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -68,7 +71,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
+
+        # --- Update visibility EMA ---
+        # visibility_filter: bool mask over current gaussians
+        vis = visibility_filter.float()
+        vis_ema.mul_(vis_decay).add_(vis, alpha=(1.0 - vis_decay))
+
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
@@ -121,16 +129,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
+            # --- Build densification gate from EMA (after warmup) ---
+            if iteration > 2000:
+                # threshold depends on dataset size; for ~50 cams this is a good starting point
+                vis_gate = vis_ema > 0.03
+                visibility_for_densify = visibility_filter & vis_gate
+            else:
+                visibility_for_densify = visibility_filter
 
             # Densification
             if iteration < opt.densify_until_iter:
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.max_radii2D[visibility_for_densify] = torch.max(gaussians.max_radii2D[visibility_for_densify], radii[visibility_for_densify])
+
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_for_densify)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
-                
+                    info = gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
+                                
+                    # ---- Update vis_ema to match the exact same ops ----
+                    n_before = info["n_before"]
+                    clone_mask = info["clone_mask"]          # [n_before]
+                    split_mask = info["split_mask"]          # [n_before]
+                    split_N = info["split_N"]
+
+                    # 1) account for clone append: new points inherit parent's EMA
+                    if clone_mask.any():
+                        vis_ema = torch.cat([vis_ema, vis_ema[:n_before][clone_mask]], dim=0)
+
+                    # 2) account for split append: new points inherit parent's EMA repeated N times
+                    if split_mask.any():
+                        vis_ema = torch.cat([vis_ema, vis_ema[:n_before][split_mask].repeat(split_N)], dim=0)
+
+                    # 3) apply split's internal prune mapping
+                    keep_after_split = info["keep_after_split"]   # bool mask over (n_before + clones + split_appends) AT THAT TIME
+                    vis_ema = vis_ema[keep_after_split]
+
+                    # 4) apply final prune mapping
+                    keep_after_prune = info["keep_after_prune"]   # bool mask over state after previous step
+                    vis_ema = vis_ema[keep_after_prune]
+
+                    # Sanity
+                    assert vis_ema.shape[0] == gaussians.get_xyz.shape[0]
+
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
