@@ -51,6 +51,7 @@ class GaussianModel:
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self._ambient = torch.empty(0)
+        self._intensity = torch.empty(0)
         self._kspecular = torch.empty(0)
         self._shiny = torch.empty(0)
         self.max_radii2D = torch.empty(0)
@@ -71,6 +72,7 @@ class GaussianModel:
             self._rotation,
             self._opacity,
             self._ambient,
+            self._intensity,
             self._kspecular,
             self._shiny,
             self.max_radii2D,
@@ -89,6 +91,7 @@ class GaussianModel:
         self._rotation, 
         self._opacity,
         self._ambient,
+        self._intensity,
         self._kspecular,
         self._shiny,
         self.max_radii2D, 
@@ -138,6 +141,16 @@ class GaussianModel:
         return self.AMBIENT_MAX * torch.sigmoid(self._ambient)
 
     @property
+    def get_intensity_raw(self):
+        """Raw learnable intensity parameter (logit). Shape e.g. [1,1]."""
+        return self._intensity
+
+    @property
+    def get_intensity(self):
+        """Effective intensity used by CUDA"""
+        return torch.sigmoid(self._intensity)
+
+    @property
     def get_kspecular_raw(self):
         """Raw learnable kspec parameter (logit)."""
         return self._kspecular
@@ -165,6 +178,9 @@ class GaussianModel:
         rawA = float(self.get_ambient_raw.view(-1)[0].item())
         effA = float(self.get_ambient.view(-1)[0].item())
 
+        rawI = float(self.get_intensity_raw.view(-1)[0].item())
+        effI = float(self.get_intensity.view(-1)[0].item())
+
         rawKs = float(self.get_kspecular_raw.view(-1)[0].item())
         effKs = float(self.get_kspecular.view(-1)[0].item())
 
@@ -174,6 +190,7 @@ class GaussianModel:
         # Optional: also report if anything went non-finite
         finite = (
             torch.isfinite(self.get_ambient).all()
+            and torch.isfinite(self.get_intensity).all()
             and torch.isfinite(self.get_kspecular).all()
             and torch.isfinite(self.get_shiny).all()
         )
@@ -181,6 +198,8 @@ class GaussianModel:
         return {
             "A_raw": rawA,
             "A_eff": effA,
+            "I_raw": rawI,
+            "I_eff": effI,
             "Ks_raw": rawKs,
             "Ks_eff": effKs,
             "Sh_raw": rawSh,
@@ -220,6 +239,10 @@ class GaussianModel:
             self.inverse_opacity_activation(torch.tensor([[t0]], device="cuda", dtype=torch.float32))
         )
 
+        intensity = torch.nn.Parameter(
+            self.inverse_opacity_activation(torch.ones((1, 1), dtype=torch.float, device="cuda"))
+        )
+
         kspecular = self.inverse_opacity_activation(0.10 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
         shiny = self.inverse_opacity_activation(0.10 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
 
@@ -230,6 +253,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self._ambient = nn.Parameter(ambient.requires_grad_(True))
+        self._intensity = nn.Parameter(intensity.requires_grad_(True))
         self._kspecular = nn.Parameter(kspecular.requires_grad_(True))
         self._shiny = nn.Parameter(shiny.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
@@ -245,6 +269,7 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._ambient], 'lr': training_args.ambient_lr, "name": "ambient"},
+            {'params': [self._intensity], 'lr': training_args.intensity_lr, "name": "intensity"},
             {'params': [self._kspecular], 'lr': training_args.kspecular_lr, "name": "kspecular"},
             {'params': [self._shiny], 'lr': training_args.shiny_lr, "name": "shiny"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
@@ -274,6 +299,7 @@ class GaussianModel:
             l.append('f_rest_{}'.format(i))
         l.append('opacity')
         l.append('ambient')
+        l.append('intensity')
         l.append('kspecular')
         l.append('shiny')
         for i in range(self._scaling.shape[1]):
@@ -295,6 +321,10 @@ class GaussianModel:
         if ambient.shape[0] == 1 and xyz.shape[0] != 1:
             ambient = np.repeat(ambient.reshape(1, -1), xyz.shape[0], axis=0)
 
+        intensity = self._intensity.detach().cpu().numpy()
+        if intensity.shape[0] == 1 and xyz.shape[0] != 1:
+            intensity = np.repeat(intensity.reshape(1, -1), xyz.shape[0], axis=0)
+
         kspecular = self._kspecular.detach().cpu().numpy()
         if kspecular.shape[0] == 1 and xyz.shape[0] != 1:
             kspecular = np.repeat(kspecular.reshape(1, -1), xyz.shape[0], axis=0)
@@ -309,7 +339,7 @@ class GaussianModel:
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, ambient, kspecular, shiny, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, ambient, intensity, kspecular, shiny, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -327,6 +357,7 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
         ambient = np.asarray(plydata.elements[0]["ambient"])[..., np.newaxis]
+        intensity = np.asarray(plydata.elements[0]["intensity"])[..., np.newaxis]
         kspecular = np.asarray(plydata.elements[0]["kspecular"])[..., np.newaxis]
         shiny = np.asarray(plydata.elements[0]["shiny"])[..., np.newaxis]
 
@@ -361,6 +392,7 @@ class GaussianModel:
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._ambient = nn.Parameter(torch.tensor(ambient, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._intensity = nn.Parameter(torch.tensor(intensity, dtype=torch.float, device="cuda").requires_grad_(True))
         self._kspecular = nn.Parameter(torch.tensor(kspecular, dtype=torch.float, device="cuda").requires_grad_(True))
         self._shiny = nn.Parameter(torch.tensor(shiny, dtype=torch.float, device="cuda").requires_grad_(True))        
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
@@ -389,7 +421,7 @@ class GaussianModel:
             # NEW
             p = group["params"][0]
             # skip non-per-point params
-            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)) or group["name"] in ["ambient"]:
+            if p.ndim == 0 or (p.ndim == 2 and p.shape == (1, 1)) or group["name"] in ["ambient", "intensity"]:
                 optimizable_tensors[group["name"]] = p
                 continue
 
@@ -417,6 +449,7 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._ambient = optimizable_tensors["ambient"]
+        self._intensity = optimizable_tensors["intensity"]
         self._kspecular = optimizable_tensors["kspecular"]
         self._shiny = optimizable_tensors["shiny"]
         self._scaling = optimizable_tensors["scaling"]
@@ -470,6 +503,7 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._ambient = optimizable_tensors["ambient"]
+        self._intensity = optimizable_tensors["intensity"]
         self._kspecular = optimizable_tensors["kspecular"]
         self._shiny = optimizable_tensors["shiny"]
         self._scaling = optimizable_tensors["scaling"]

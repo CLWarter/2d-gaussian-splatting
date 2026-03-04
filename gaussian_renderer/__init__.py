@@ -55,11 +55,13 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     means3D = pc.get_xyz
     means2D = screenspace_points
     opacity    = pc.get_opacity
-    ambient    = pc._ambient       # raw logit (per-scene or per-gaussian)
-    kspecular  = pc._kspecular     # raw logit
-    shiny      = pc._shiny         # raw logit
+    ambient    = pc._ambient       # raw logit (per scene)
+    intensity =  pc._intensity      # raw logit (per scene)
+    kspecular  = pc._kspecular     # raw logit (per gaussian)
+    shiny      = pc._shiny         # raw logit (per gaussian)
     # opacity = pc.get_opacity
     # ambient = pc.get_ambient
+    # intensity = pc.get_intensity
     # kspecular = pc.get_kspecular
     # shiny = pc.get_shiny
 
@@ -108,6 +110,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = colors_precomp,
         opacities = opacity,
         ambients = ambient,
+        intensity = intensity,
         kspecular = kspecular,
         shiny = shiny,
         scales = scales,

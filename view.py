@@ -41,6 +41,8 @@ def view(dataset, pipe, iteration):
                         # viewer/debug
                         #"A_raw": viewer_metrics["A_raw"],
                         "A_eff": viewer_metrics["A_eff"],
+                        #"I_raw": viewer_metrics["I_raw"],
+                        "I_eff": viewer_metrics["I_eff"],
                         #"Ks_raw": viewer_metrics["Ks_raw"],
                         "Ks_eff": viewer_metrics["Ks_eff"],
                         #"Sh_raw": viewer_metrics["Sh_raw"],
