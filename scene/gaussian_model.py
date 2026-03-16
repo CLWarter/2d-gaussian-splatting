@@ -11,7 +11,7 @@
 
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, inverse_softplus
 from torch import nn
 import os
 from utils.system_utils import mkdir_p
@@ -38,6 +38,7 @@ class GaussianModel:
         self.covariance_activation = build_covariance_from_scaling_rotation
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
+        self.inverse_intensity_activation = inverse_softplus
         self.rotation_activation = torch.nn.functional.normalize
 
 
@@ -148,7 +149,7 @@ class GaussianModel:
     @property
     def get_intensity(self):
         """Effective intensity used by CUDA"""
-        return torch.sigmoid(self._intensity)
+        return torch.nn.functional.softplus(self._intensity, beta=2)
 
     @property
     def get_kspecular_raw(self):
@@ -240,7 +241,7 @@ class GaussianModel:
         )
 
         intensity = torch.nn.Parameter(
-            self.inverse_opacity_activation(torch.ones((1, 1), dtype=torch.float, device="cuda"))
+            self.inverse_intensity_activation(torch.ones((1, 1), dtype=torch.float, device="cuda"))
         )
 
         kspecular = self.inverse_opacity_activation(0.10 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
