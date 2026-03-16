@@ -1,31 +1,64 @@
 import argparse
 import json
+import re
 from pathlib import Path
+from collections import defaultdict
 
 
 def load_results(results_path: Path):
     with open(results_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # expected keys: SSIM, PSNR, LPIPS
     ssim = float(data["SSIM"])
     psnr = float(data["PSNR"])
     lpips = float(data["LPIPS"])
-    return ssim, psnr, lpips
+    meta = data.get("meta", {})
+    return ssim, psnr, lpips, meta
 
 
 def minmax(values):
     vmin = min(values)
     vmax = max(values)
     if abs(vmax - vmin) < 1e-12:
-        # all equal -> return 0.5 for everyone to avoid div-by-zero
         return [0.5 for _ in values], vmin, vmax
     return [(v - vmin) / (vmax - vmin) for v in values], vmin, vmax
 
 
+def get_source_path_from_cfg(run_dir: Path):
+    cfg = run_dir / "cfg_args"
+    if not cfg.is_file():
+        return None
+
+    txt = cfg.read_text(encoding="utf-8", errors="ignore")
+
+    m = re.search(r"source_path\s*=\s*['\"]([^'\"]+)['\"]", txt)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"--source_path\s+([^\s]+)", txt)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def short_scene_name(source_path: str):
+    """
+    Turn a long source path into a shorter display name.
+    Example:
+      C:/Users/.../BlenderDataset/vase   -> vase
+      /data/scenes/lamp                 -> lamp
+    """
+    if not source_path:
+        return "UNKNOWN_SOURCE"
+    p = Path(source_path)
+    name = p.name
+    return name if name else str(p)
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="Compare 2DGS export_iter_* results.json files and rank best->worst."
+        description="Compare 2DGS export_iter_* results.json files and rank globally and per source model path."
     )
     ap.add_argument(
         "--root", "-r", required=True,
@@ -40,8 +73,8 @@ def main():
         help="Only include results whose parent folder contains this string (default: export_iter_)"
     )
     ap.add_argument(
-        "--top", type=int, default=0,
-        help="Show only top N entries (0 = show all)"
+        "--top", type=int, default=10,
+        help="Show top N globally and per source model path (default: 10)"
     )
     args = ap.parse_args()
 
@@ -53,66 +86,125 @@ def main():
     for p in root.rglob(args.pattern):
         if not p.is_file():
             continue
+
         export_dir = p.parent
         if args.filter and (args.filter not in export_dir.name):
             continue
 
         try:
-            ssim, psnr, lp = load_results(p)
+            ssim, psnr, lp, meta = load_results(p)
         except Exception as e:
             print(f"[WARN] Skipping {p} ({e})")
             continue
 
-        # Identify "where from"
-        run_id = export_dir.parent.name  # e.g. fe7d413a-5
-        export_name = export_dir.name    # e.g. export_iter_15000
+        run_dir = export_dir.parent
+        run_id = run_dir.name
+        export_name = export_dir.name
+
+        # Prefer meta["source_path"], fallback to cfg_args
+        source_path = meta.get("source_path")
+        if not source_path:
+            source_path = get_source_path_from_cfg(run_dir)
+
+        scene_name = short_scene_name(source_path)
 
         rows.append({
             "path": str(export_dir),
             "run": run_id,
             "export": export_name,
+            "run_dir": str(run_dir),
             "SSIM": ssim,
             "PSNR": psnr,
             "LPIPS": lp,
+            "source_path": source_path if source_path else "UNKNOWN_SOURCE",
+            "scene_name": scene_name,
         })
 
     if not rows:
         print("[INFO] No results found. Are your results.json files inside export_iter_* folders?")
         return 0
 
-    # --- Ranking A: robust lexicographic order (LPIPS best, then SSIM, then PSNR)
+    # ---------- Global lexicographic ranking ----------
     rows_lexi = sorted(rows, key=lambda r: (r["LPIPS"], -r["SSIM"], -r["PSNR"]))
 
-    # --- Ranking B: combined normalized score (higher better)
+    # ---------- Global combined score ----------
     ssims = [r["SSIM"] for r in rows]
     psnrs = [r["PSNR"] for r in rows]
     lpipss = [r["LPIPS"] for r in rows]
 
     ssim_n, _, _ = minmax(ssims)
     psnr_n, _, _ = minmax(psnrs)
-    lp_inv_n, _, _ = minmax([-v for v in lpipss])  # invert so higher=better
+    lp_inv_n, _, _ = minmax([-v for v in lpipss])
 
     for r, a, b, c in zip(rows, ssim_n, psnr_n, lp_inv_n):
         r["score"] = (a + b + c) / 3.0
 
     rows_score = sorted(rows, key=lambda r: (-r["score"], r["LPIPS"], -r["SSIM"], -r["PSNR"]))
 
-    # Output
     topn = args.top if args.top and args.top > 0 else len(rows)
 
-    print("\n=== Ranking (robust): LPIPS asc, then SSIM desc, then PSNR desc ===")
+    print("\n=== GLOBAL Ranking (robust): LPIPS asc, then SSIM desc, then PSNR desc ===")
     for i, r in enumerate(rows_lexi[:topn], start=1):
         print(
             f"{i:>3}. LPIPS={r['LPIPS']:.6f}  SSIM={r['SSIM']:.6f}  PSNR={r['PSNR']:.4f}  "
-            f"FROM={r['run']}/{r['export']}  PATH={r['path']}"
+            f"SCENE={r['scene_name']}  FROM={r['run']}/{r['export']}  PATH={r['path']}"
         )
 
-    print("\n=== Ranking (combined score, higher is better; min-max normalized) ===")
+    print("\n=== GLOBAL Ranking (combined score, higher is better) ===")
     for i, r in enumerate(rows_score[:topn], start=1):
         print(
-            f"{i:>3}. SCORE={r['score']:.6f}  (LPIPS={r['LPIPS']:.6f}, SSIM={r['SSIM']:.6f}, PSNR={r['PSNR']:.4f})  "
-            f"FROM={r['run']}/{r['export']}  PATH={r['path']}"
+            f"{i:>3}. SCORE={r['score']:.6f}  "
+            f"(LPIPS={r['LPIPS']:.6f}, SSIM={r['SSIM']:.6f}, PSNR={r['PSNR']:.4f})  "
+            f"SCENE={r['scene_name']}  FROM={r['run']}/{r['export']}  PATH={r['path']}"
         )
+
+    # ---------- Group by source model path ----------
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r["source_path"]].append(r)
+
+    print("\n=== TOP PER SOURCE MODEL PATH (robust: LPIPS asc, then SSIM desc, then PSNR desc) ===")
+    for source_path in sorted(groups.keys(), key=lambda x: str(x).lower()):
+        grouped = sorted(groups[source_path], key=lambda r: (r["LPIPS"], -r["SSIM"], -r["PSNR"]))
+        scene_name = grouped[0]["scene_name"]
+
+        print(f"\n--- SCENE: {scene_name}  (showing top {min(topn, len(grouped))} of {len(grouped)}) ---")
+        print(f"    SOURCE_PATH: {source_path}")
+        for i, r in enumerate(grouped[:topn], start=1):
+            print(
+                f"{i:>3}. LPIPS={r['LPIPS']:.6f}  SSIM={r['SSIM']:.6f}  PSNR={r['PSNR']:.4f}  "
+                f"FROM={r['run']}/{r['export']}  PATH={r['path']}"
+            )
+
+    print("\n=== TOP PER SOURCE MODEL PATH (combined score, higher is better) ===")
+    for source_path in sorted(groups.keys(), key=lambda x: str(x).lower()):
+        grouped = groups[source_path]
+        scene_name = grouped[0]["scene_name"]
+
+        g_ssims = [r["SSIM"] for r in grouped]
+        g_psnrs = [r["PSNR"] for r in grouped]
+        g_lpipss = [r["LPIPS"] for r in grouped]
+
+        g_ssim_n, _, _ = minmax(g_ssims)
+        g_psnr_n, _, _ = minmax(g_psnrs)
+        g_lp_inv_n, _, _ = minmax([-v for v in g_lpipss])
+
+        local_rows = []
+        for r, a, b, c in zip(grouped, g_ssim_n, g_psnr_n, g_lp_inv_n):
+            rr = dict(r)
+            rr["local_score"] = (a + b + c) / 3.0
+            local_rows.append(rr)
+
+        local_rows = sorted(local_rows, key=lambda r: (-r["local_score"], r["LPIPS"], -r["SSIM"], -r["PSNR"]))
+
+        print(f"\n--- SCENE: {scene_name}  (showing top {min(topn, len(local_rows))} of {len(local_rows)}) ---")
+        print(f"    SOURCE_PATH: {source_path}")
+        for i, r in enumerate(local_rows[:topn], start=1):
+            print(
+                f"{i:>3}. SCORE={r['local_score']:.6f}  "
+                f"(LPIPS={r['LPIPS']:.6f}, SSIM={r['SSIM']:.6f}, PSNR={r['PSNR']:.4f})  "
+                f"FROM={r['run']}/{r['export']}  PATH={r['path']}"
+            )
 
     return 0
 
