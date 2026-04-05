@@ -17,7 +17,7 @@ def get_intrinsics(cam):
 
 def depth_to_world_points(cam, depth):
     H, W = depth.shape[-2:]
-    K = get_intrinsics(cam)
+    K = get_intrinsics_scaled(cam, H, W)
     Kinv = torch.inverse(K)
 
     ys, xs = torch.meshgrid(
@@ -39,11 +39,16 @@ def depth_to_world_points(cam, depth):
 
 def world_to_view_depth_uv(cam, pts_world):
     H, W = pts_world.shape[:2]
-    pts_h = torch.cat([pts_world.view(-1,3), torch.ones((pts_world.numel()//3,1), device="cuda")], dim=1)
+
+    pts_h = torch.cat([
+        pts_world.view(-1, 3),
+        torch.ones((pts_world.numel() // 3, 1), device="cuda")
+    ], dim=1)
+
     pts_view = pts_h @ cam.world_view_transform.T
     z = pts_view[:, 2:3]
 
-    K = get_intrinsics(cam)
+    K = get_intrinsics_scaled(cam, H, W)
     pix = pts_view[:, :3] @ K.T
     uv = pix[:, :2] / (pix[:, 2:3] + 1e-8)
 
@@ -78,3 +83,15 @@ def normals_to_world(cam, normal_chw):
     n = normal_chw.permute(1,2,0) @ R[:3,:3].T
     n = torch.nn.functional.normalize(n, dim=-1)
     return n.permute(2,0,1)
+
+def get_intrinsics_scaled(cam, H, W):
+    fx = fov2focal(cam.FoVx, cam.image_width) * (W / cam.image_width)
+    fy = fov2focal(cam.FoVy, cam.image_height) * (H / cam.image_height)
+    cx = W * 0.5
+    cy = H * 0.5
+    K = torch.tensor([
+        [fx, 0.0, cx],
+        [0.0, fy, cy],
+        [0.0, 0.0, 1.0]
+    ], dtype=torch.float32, device="cuda")
+    return K
