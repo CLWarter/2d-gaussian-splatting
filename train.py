@@ -27,6 +27,12 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+from utils.my_consistency import (
+    depth_to_world_points,
+    world_to_view_depth_uv,
+    sample_map,
+    normals_to_world,
+)
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
@@ -65,14 +71,54 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-        
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
-        gt_image = viewpoint_cam.original_image.cuda()
+
+        viewpoint_cam_a = viewpoint_cam
+        out_a = render(viewpoint_cam_a, gaussians, pipe, background)
+
+        render_pkg = out_a
+        image = render_pkg["render"]
+        viewspace_point_tensor = render_pkg["viewspace_points"]
+        visibility_filter = render_pkg["visibility_filter"]
+        radii = render_pkg["radii"]
+
+        gt_image = viewpoint_cam_a.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        
+
+        mv_depth_loss = torch.tensor(0.0, device="cuda")
+        mv_normal_loss = torch.tensor(0.0, device="cuda")
+
+        use_mv = (iteration > 7000) and (iteration % 8 == 0)
+
+        if use_mv:
+            viewpoint_cam_b = scene.getNearbyTrainCamera(viewpoint_cam_a)
+            out_b = render(viewpoint_cam_b, gaussians, pipe, background)
+
+            pts_world = depth_to_world_points(viewpoint_cam_a, out_a["surf_depth"])
+            grid_b, z_b_pred, in_bounds = world_to_view_depth_uv(viewpoint_cam_b, pts_world)
+
+            depth_b_samp = sample_map(out_b["surf_depth"], grid_b)
+            alpha_b_samp = sample_map(out_b["rend_alpha"], grid_b)
+            normal_b_samp = sample_map(out_b["rend_normal"], grid_b)
+
+            alpha_a = out_a["rend_alpha"]
+            w = (alpha_a * alpha_b_samp).detach() * in_bounds.permute(2,0,1).float()
+            valid = (w > 1e-4).float()
+            w = w * valid
+
+            depth_res = depth_b_samp - z_b_pred.permute(2,0,1)
+            mv_depth_loss = (w * torch.sqrt(depth_res * depth_res + 1e-6)).sum() / (w.sum() + 1e-8)
+
+            normal_a_w = normals_to_world(viewpoint_cam_a, out_a["rend_normal"])
+            normal_b_w = normals_to_world(viewpoint_cam_b, normal_b_samp)
+            dot_nb = (normal_a_w * normal_b_w).sum(dim=0, keepdim=True)
+            mv_normal_loss = (w * (1.0 - dot_nb).clamp_min(0.0)).sum() / (w.sum() + 1e-8)
+
+            if iteration % 500 == 0:
+                print("z_pred stats:", z_b_pred.mean().item(), z_b_pred.min().item(), z_b_pred.max().item())
+                print("depth_b stats:", depth_b_samp.mean().item(), depth_b_samp.min().item(), depth_b_samp.max().item())
+                print(f"[ITER {iteration}] mv_depth={mv_depth_loss.item():.6f} mv_normal={mv_normal_loss.item():.6f}")
+
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
@@ -84,8 +130,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
+        lambda_mv_depth = opt.lambda_mv_depth if iteration > 7000 else 0.0
+        lambda_mv_normal = opt.lambda_mv_normal if iteration > 7000 else 0.0
+
+        if iteration % 100 == 0:
+            print(f"[ITER {iteration}] mv_depth={mv_depth_loss.item():.6f} mv_normal={mv_normal_loss.item():.6f}")
+
+        if tb_writer is not None:
+            tb_writer.add_scalar('train_loss_patches/mv_depth_loss', mv_depth_loss.item(), iteration)
+            tb_writer.add_scalar('train_loss_patches/mv_normal_loss', mv_normal_loss.item(), iteration)
+
         # loss
-        total_loss = loss + dist_loss + normal_loss
+        total_loss = loss + dist_loss + normal_loss \
+        + lambda_mv_depth * mv_depth_loss \
+        + lambda_mv_normal * mv_normal_loss
         
         total_loss.backward()
 

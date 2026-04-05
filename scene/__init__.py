@@ -17,6 +17,7 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+import torch
 
 class Scene:
 
@@ -91,3 +92,25 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+    
+    def getNearbyTrainCamera(self, cam, scale=1.0):
+        train_cams = self.train_cameras[scale]
+
+        if len(train_cams) <= 1:
+            return cam
+
+        cam_center = cam.camera_center.detach()
+        best_cam = None
+        best_dist = None
+
+        for other in train_cams:
+            if other.uid == cam.uid:
+                continue
+
+            d = torch.norm(other.camera_center.detach() - cam_center).item()
+
+            if best_dist is None or d < best_dist:
+                best_dist = d
+                best_cam = other
+
+        return best_cam if best_cam is not None else cam
