@@ -95,3 +95,95 @@ def get_intrinsics_scaled(cam, H, W):
         [0.0, 0.0, 1.0]
     ], dtype=torch.float32, device="cuda")
     return K
+
+def compute_mv_losses(
+    viewpoint_cam_a,
+    out_a,
+    viewpoint_cam_b,
+    out_b,
+    max_samples=5000,
+    use_normal=True,
+    use_abs_normal=True,
+):
+    depth_a_mv = F.interpolate(
+        out_a["surf_depth"].unsqueeze(0),
+        scale_factor=0.25,
+        mode="bilinear",
+        align_corners=False
+    ).squeeze(0)
+
+    depth_b_mv = F.interpolate(
+        out_b["surf_depth"].unsqueeze(0),
+        scale_factor=0.25,
+        mode="bilinear",
+        align_corners=False
+    ).squeeze(0)
+
+    alpha_a_mv = F.interpolate(
+        out_a["rend_alpha"].unsqueeze(0),
+        scale_factor=0.25,
+        mode="bilinear",
+        align_corners=False
+    ).squeeze(0)
+
+    alpha_b_mv = F.interpolate(
+        out_b["rend_alpha"].unsqueeze(0),
+        scale_factor=0.25,
+        mode="bilinear",
+        align_corners=False
+    ).squeeze(0)
+
+    pts_world = depth_to_world_points(viewpoint_cam_a, depth_a_mv)
+    grid_b, z_b_pred, in_bounds = world_to_view_depth_uv(viewpoint_cam_b, pts_world)
+
+    depth_b_samp = sample_map(depth_b_mv, grid_b)
+    alpha_b_samp = sample_map(alpha_b_mv, grid_b)
+
+    w = (alpha_a_mv * alpha_b_samp).detach() * in_bounds.permute(2, 0, 1).float()
+
+    flat_w = w.view(-1)
+    valid_idx = (flat_w > 0.0).nonzero(as_tuple=False).squeeze(1)
+
+    mv_depth_loss = torch.tensor(0.0, device="cuda")
+    mv_normal_loss = torch.tensor(0.0, device="cuda")
+
+    if valid_idx.numel() > 0:
+        if valid_idx.numel() > max_samples:
+            perm = torch.randperm(valid_idx.numel(), device="cuda")[:max_samples]
+            valid_idx = valid_idx[perm]
+
+        z_pred_flat = z_b_pred.permute(2, 0, 1).contiguous().view(-1)
+        depth_b_flat = depth_b_samp.view(-1)
+
+        depth_res = (depth_b_flat[valid_idx] - z_pred_flat[valid_idx]) / (z_pred_flat[valid_idx].abs() + 1e-3)
+        w_sel = flat_w[valid_idx]
+
+        mv_depth_loss = (w_sel * torch.sqrt(depth_res * depth_res + 1e-6)).sum() / (w_sel.sum() + 1e-8)
+
+        if use_normal:
+            normal_a_mv = F.interpolate(
+                out_a["rend_normal"].unsqueeze(0),
+                scale_factor=0.25,
+                mode="bilinear",
+                align_corners=False
+            ).squeeze(0)
+
+            normal_b_mv = F.interpolate(
+                out_b["rend_normal"].unsqueeze(0),
+                scale_factor=0.25,
+                mode="bilinear",
+                align_corners=False
+            ).squeeze(0)
+
+            normal_b_samp = sample_map(normal_b_mv, grid_b)
+
+            normal_a_w = normals_to_world(viewpoint_cam_a, normal_a_mv)
+            normal_b_w = normals_to_world(viewpoint_cam_b, normal_b_samp)
+
+            dot_nb = (normal_a_w * normal_b_w).sum(dim=0, keepdim=True).view(-1)[valid_idx]
+            if use_abs_normal:
+                dot_nb = dot_nb.abs()
+
+            mv_normal_loss = (w_sel * (1.0 - dot_nb)).sum() / (w_sel.sum() + 1e-8)
+
+    return mv_depth_loss, mv_normal_loss

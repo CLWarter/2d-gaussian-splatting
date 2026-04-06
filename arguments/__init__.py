@@ -91,8 +91,15 @@ class OptimizationParams(ParamGroup):
         self.lambda_normal = 0.05
         self.opacity_cull = 0.05
 
-        self.lambda_mv_depth = 0.01 #5
-        self.lambda_mv_normal = 0.01 #5
+        self.lambda_mv_depth = 0.02
+        self.lambda_mv_normal = 0.005
+
+        self.mv_start_iter = 7000
+        self.mv_every = 64
+        self.mv_max_samples = 5000
+        self.mv_neighbor_k = 4
+        self.mv_use_normal = True
+        self.mv_use_abs_normal = True
 
         self.densification_interval = 100
         self.opacity_reset_interval = 3000

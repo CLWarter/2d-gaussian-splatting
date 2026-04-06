@@ -27,13 +27,7 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
-from utils.my_consistency import (
-    depth_to_world_points,
-    world_to_view_depth_uv,
-    sample_map,
-    normals_to_world,
-)
-import torch.nn.functional as F
+from utils.my_consistency import compute_mv_losses
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
@@ -89,76 +83,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         mv_depth_loss = torch.tensor(0.0, device="cuda")
         mv_normal_loss = torch.tensor(0.0, device="cuda")
 
-        use_mv = (iteration > 7000) and (iteration % 64 == 0)
+        use_mv = (iteration > opt.mv_start_iter) and (iteration % opt.mv_every == 0)
 
         if use_mv:
             viewpoint_cam_b = scene.getNearbyTrainCamera(viewpoint_cam_a)
             out_b = render(viewpoint_cam_b, gaussians, pipe, background)
 
-            # quarter-resolution depth/alpha for cheap MV
-            depth_a_mv = F.interpolate(
-                out_a["surf_depth"].unsqueeze(0),
-                scale_factor=0.25,
-                mode="bilinear",
-                align_corners=False
-            ).squeeze(0)
+            mv_depth_loss, mv_normal_loss = compute_mv_losses(
+                viewpoint_cam_a=viewpoint_cam_a,
+                out_a=out_a,
+                viewpoint_cam_b=viewpoint_cam_b,
+                out_b=out_b,
+                max_samples=opt.mv_max_samples,
+                use_normal=opt.mv_use_normal,
+                use_abs_normal=opt.mv_use_abs_normal,
+            )
 
-            depth_b_mv = F.interpolate(
-                out_b["surf_depth"].unsqueeze(0),
-                scale_factor=0.25,
-                mode="bilinear",
-                align_corners=False
-            ).squeeze(0)
-
-            alpha_a_mv = F.interpolate(
-                out_a["rend_alpha"].unsqueeze(0),
-                scale_factor=0.25,
-                mode="bilinear",
-                align_corners=False
-            ).squeeze(0)
-
-            alpha_b_mv = F.interpolate(
-                out_b["rend_alpha"].unsqueeze(0),
-                scale_factor=0.25,
-                mode="bilinear",
-                align_corners=False
-            ).squeeze(0)
-
-            pts_world = depth_to_world_points(viewpoint_cam_a, depth_a_mv)
-            grid_b, z_b_pred, in_bounds = world_to_view_depth_uv(viewpoint_cam_b, pts_world)
-
-            depth_b_samp = sample_map(depth_b_mv, grid_b)
-            alpha_b_samp = sample_map(alpha_b_mv, grid_b)
-
-            w = (alpha_a_mv * alpha_b_samp).detach() * in_bounds.permute(2, 0, 1).float()
-            valid = (w > 1e-4)
-
-            # random subset of valid pixels
-            valid_idx = valid.view(-1).nonzero(as_tuple=False).squeeze(1)
-
-            if valid_idx.numel() > 0:
-                max_samples = 5000
-                if valid_idx.numel() > max_samples:
-                    perm = torch.randperm(valid_idx.numel(), device="cuda")[:max_samples]
-                    valid_idx = valid_idx[perm]
-
-                depth_res = (depth_b_samp - z_b_pred.permute(2, 0, 1)).view(-1)[valid_idx]
-                w_sel = w.view(-1)[valid_idx]
-
-                mv_depth_loss = (w_sel * torch.sqrt(depth_res * depth_res + 1e-6)).sum() / (w_sel.sum() + 1e-8)
-
-            if iteration % 512 == 0:
-                print(f"[ITER {iteration}] cheap_mv_depth={mv_depth_loss.item():.6f}")
-
-            #normal_a_w = normals_to_world(viewpoint_cam_a, out_a["rend_normal"])
-            #normal_b_w = normals_to_world(viewpoint_cam_b, normal_b_samp)
-            #dot_nb = (normal_a_w * normal_b_w).sum(dim=0, keepdim=True)
-            #mv_normal_loss = (w * (1.0 - dot_nb).clamp_min(0.0)).sum() / (w.sum() + 1e-8)
-
-            if iteration % 500 == 0:
-                print("z_pred stats:", z_b_pred.mean().item(), z_b_pred.min().item(), z_b_pred.max().item())
-                print("depth_b stats:", depth_b_samp.mean().item(), depth_b_samp.min().item(), depth_b_samp.max().item())
-                print(f"[ITER {iteration}] mv_depth={mv_depth_loss.item():.6f} mv_normal={mv_normal_loss.item():.6f}")
+            print(f"[ITER {iteration}] use_mv=True self_view_test=True mv_depth={mv_depth_loss.item():.6f} mv_normal={mv_normal_loss.item():.6f}")
 
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -171,8 +112,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
-        lambda_mv_depth = opt.lambda_mv_depth if iteration > 7000 else 0.0
-        lambda_mv_normal = 0.0 # opt.lambda_mv_normal if iteration > 7000 else 0.0
+        lambda_mv_depth = opt.lambda_mv_depth if iteration > opt.mv_start_iter else 0.0
+        lambda_mv_normal = opt.lambda_mv_normal if (iteration > opt.mv_start_iter and opt.mv_use_normal) else 0.0
 
         if iteration % 100 == 0:
             print(f"[ITER {iteration}] mv_depth={mv_depth_loss.item():.6f} mv_normal={mv_normal_loss.item():.6f}")
@@ -183,8 +124,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # loss
         total_loss = loss + dist_loss + normal_loss \
-        + lambda_mv_depth * mv_depth_loss #\
-        #+ lambda_mv_normal * mv_normal_loss
+        + lambda_mv_depth * mv_depth_loss \
+        + lambda_mv_normal * mv_normal_loss
         
         total_loss.backward()
 

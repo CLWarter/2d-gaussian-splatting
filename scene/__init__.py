@@ -74,6 +74,9 @@ class Scene:
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+
+        self.nearby_train_cameras = {}
+        self._build_nearby_camera_lists(k=getattr(args, "mv_neighbor_k", 4))
         
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
@@ -82,6 +85,31 @@ class Scene:
                                                            "point_cloud.ply"))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+
+    def _build_nearby_camera_lists(self, k=4, scale=1.0):
+        train_cams = self.train_cameras[scale]
+        self.nearby_train_cameras[scale] = {}
+
+        if len(train_cams) <= 1:
+            for cam in train_cams:
+                self.nearby_train_cameras[scale][cam.uid] = [cam]
+            return
+
+        centers = torch.stack([cam.camera_center.detach().cpu() for cam in train_cams], dim=0)
+        dists = torch.cdist(centers, centers)
+
+        for i, cam in enumerate(train_cams):
+            _, idx = torch.sort(dists[i])
+            neighbors = []
+            for j in idx.tolist():
+                other = train_cams[j]
+                if other.uid == cam.uid:
+                    continue
+                neighbors.append(other)
+                if len(neighbors) >= k:
+                    break
+            self.nearby_train_cameras[scale][cam.uid] = neighbors if len(neighbors) > 0 else [cam]
+
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
@@ -94,23 +122,13 @@ class Scene:
         return self.test_cameras[scale]
     
     def getNearbyTrainCamera(self, cam, scale=1.0):
-        train_cams = self.train_cameras[scale]
+        if scale not in self.nearby_train_cameras:
+            self._build_nearby_camera_lists(scale=scale, k=4)
 
-        if len(train_cams) <= 1:
+        neighbors = self.nearby_train_cameras[scale].get(cam.uid, [cam])
+
+        if len(neighbors) == 0:
             return cam
 
-        cam_center = cam.camera_center.detach()
-        best_cam = None
-        best_dist = None
-
-        for other in train_cams:
-            if other.uid == cam.uid:
-                continue
-
-            d = torch.norm(other.camera_center.detach() - cam_center).item()
-
-            if best_dist is None or d < best_dist:
-                best_dist = d
-                best_cam = other
-
-        return best_cam if best_cam is not None else cam
+        return random.choice(neighbors)
+    
