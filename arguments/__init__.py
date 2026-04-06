@@ -88,7 +88,16 @@ class OptimizationParams(ParamGroup):
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
+
+        # Old normal term weight; we will reuse it as the alpha-weighted normal agreement weight
         self.lambda_normal = 0.05
+
+        # New local coherence weight on surf_normal
+        self.lambda_normal_smooth = 0.02
+
+        # Warmup: do not enable normal regularization immediately
+        self.normal_regularize_from_iter = 7000
+
         self.opacity_cull = 0.05
 
         self.densification_interval = 100
