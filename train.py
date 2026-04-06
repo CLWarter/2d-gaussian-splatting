@@ -158,7 +158,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     SHINY_MIN = 2.0
                     SHINY_MAX = 128.0
 
-                    t = torch.sigmoid(gaussians._shiny).view(-1)[0].item()     # normalized 0..1
+                    t = torch.sigmoid(gaussians._metallic).view(-1)[0].item()     # normalized 0..1
                     shininess = SHINY_MIN + (SHINY_MAX - SHINY_MIN) * t        # exponent used by shader
                     
                     viewer_metrics = gaussians.get_viewer_metrics()

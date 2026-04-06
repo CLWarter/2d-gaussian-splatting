@@ -81,8 +81,8 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.ambient_lr = 0.001
         self.intensity_lr = 0.2
-        self.kspecular_lr = 0.001
-        self.shiny_lr = 0.0001
+        self.roughness_lr = 0.001
+        self.metallic_lr = 0.0001
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01

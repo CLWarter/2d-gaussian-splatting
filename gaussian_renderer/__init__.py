@@ -57,13 +57,13 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     opacity    = pc.get_opacity
     ambient    = pc._ambient       # raw logit (per scene)
     intensity =  pc._intensity      # raw logit (per scene)
-    kspecular  = pc._kspecular     # raw logit (per gaussian)
-    shiny      = pc._shiny         # raw logit (per gaussian)
+    roughness  = pc._roughness     # raw logit (per gaussian)
+    metallic      = pc._metallic         # raw logit (per gaussian)
     # opacity = pc.get_opacity
     # ambient = pc.get_ambient
     # intensity = pc.get_intensity
-    # kspecular = pc.get_kspecular
-    # shiny = pc.get_shiny
+    # roughness = pc.get_roughness
+    # metallic = pc.get_metallic
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -111,8 +111,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         opacities = opacity,
         ambients = ambient,
         intensity = intensity,
-        kspecular = kspecular,
-        shiny = shiny,
+        roughness = roughness,
+        metallic = metallic,
         scales = scales,
         rotations = rotations,
         cov3D_precomp = cov3D_precomp
