@@ -33,6 +33,7 @@ from utils.my_consistency import (
     sample_map,
     normals_to_world,
 )
+import torch.nn.functional as F
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
