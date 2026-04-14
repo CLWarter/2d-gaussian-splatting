@@ -158,22 +158,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     SHINY_MIN = 2.0
                     SHINY_MAX = 128.0
 
-                    t = torch.sigmoid(gaussians._metallic).view(-1)[0].item()     # normalized 0..1
-                    shininess = SHINY_MIN + (SHINY_MAX - SHINY_MIN) * t        # exponent used by shader
-                    
+                    t = torch.sigmoid(gaussians._metallic).view(-1)[0].item()
+                    shininess = SHINY_MIN + (SHINY_MAX - SHINY_MIN) * t
+
                     viewer_metrics = gaussians.get_viewer_metrics()
                     metrics_dict = {
                         "#": int(gaussians.get_xyz.shape[0]),
                         "loss": float(ema_loss_for_log),
-
-                        # viewer/debug
-                        #"A_raw": viewer_metrics["A_raw"],
                         "A_eff": viewer_metrics["A_eff"],
-                        #"Ks_raw": viewer_metrics["Ks_raw"],
                         "Ks_eff": viewer_metrics["Ks_eff"],
-                        #"Sh_raw": viewer_metrics["Sh_raw"],
                         "Sh_eff": viewer_metrics["Sh_eff"],
-                        #"ParamsFinite": viewer_metrics["ParamsFinite"],
                     }
                     # Send the data
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)

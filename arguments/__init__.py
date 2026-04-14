@@ -82,7 +82,7 @@ class OptimizationParams(ParamGroup):
         self.ambient_lr = 0.001
         self.intensity_lr = 0.2
         self.roughness_lr = 0.001
-        self.metallic_lr = 0.0001
+        self.metallic_lr = 0.00002
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01

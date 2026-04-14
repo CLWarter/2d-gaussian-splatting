@@ -55,15 +55,10 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     means3D = pc.get_xyz
     means2D = screenspace_points
     opacity    = pc.get_opacity
-    ambient    = pc._ambient       # raw logit (per scene)
-    intensity =  pc._intensity      # raw logit (per scene)
-    roughness  = pc._roughness     # raw logit (per gaussian)
-    metallic      = pc._metallic         # raw logit (per gaussian)
-    # opacity = pc.get_opacity
-    # ambient = pc.get_ambient
-    # intensity = pc.get_intensity
-    # roughness = pc.get_roughness
-    # metallic = pc.get_metallic
+    ambient   = pc._ambient    # raw ambient parameter, per scene
+    intensity = pc._intensity  # raw intensity parameter, per scene
+    roughness = pc._roughness  # raw BRDF roughness parameter, per Gaussian
+    metallic  = pc._metallic   # raw BRDF metallic parameter, per Gaussian
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.

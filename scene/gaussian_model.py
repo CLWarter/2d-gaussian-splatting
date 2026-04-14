@@ -128,8 +128,10 @@ class GaussianModel:
         return self.opacity_activation(self._opacity)
     
     AMBIENT_MAX = 0.25
-    SHINY_MIN = 2.0
-    SHINY_MAX = 128.0
+    ROUGHNESS_MIN = 0.04
+    ROUGHNESS_MAX = 1.0
+    METALLIC_MIN = 0.0
+    METALLIC_MAX = 1.0
     @property
     def get_ambient_raw(self):
         """Raw learnable ambient parameter (logit). Shape e.g. [1,1]."""
@@ -153,25 +155,25 @@ class GaussianModel:
 
     @property
     def get_roughness_raw(self):
-        """Raw learnable kspec parameter (logit)."""
+        """Raw learnable roughness parameter (logit), per Gaussian."""
         return self._roughness
 
     @property
     def get_roughness(self):
-        """Effective kspec used by CUDA (after sigmoid)."""
-        # If you later cap it, do: return KS_MAX * torch.sigmoid(self._roughness)
-        return torch.sigmoid(self._roughness)
+        """Effective BRDF roughness in [ROUGHNESS_MIN, ROUGHNESS_MAX]."""
+        t = torch.sigmoid(self._roughness)
+        return self.ROUGHNESS_MIN + (self.ROUGHNESS_MAX - self.ROUGHNESS_MIN) * t
 
     @property
     def get_metallic_raw(self):
-        """Raw learnable shininess parameter (logit)."""
+        """Raw learnable metallic parameter (logit), per Gaussian."""
         return self._metallic
 
     @property
     def get_metallic(self):
-        """Effective shininess exponent used by CUDA (mapped to [SHINY_MIN, SHINY_MAX])."""
+        """Effective BRDF metallic factor in [METALLIC_MIN, METALLIC_MAX]."""
         t = torch.sigmoid(self._metallic)
-        return self.SHINY_MIN + (self.SHINY_MAX - self.SHINY_MIN) * t
+        return self.METALLIC_MIN + (self.METALLIC_MAX - self.METALLIC_MIN) * t
 
     def get_viewer_metrics(self):
         """Convenience: returns scalars for viewer/debug (raw + effective)."""
@@ -182,13 +184,13 @@ class GaussianModel:
         rawI = float(self.get_intensity_raw.view(-1)[0].item())
         effI = float(self.get_intensity.view(-1)[0].item())
 
-        rawKs = float(self.get_roughness_raw.view(-1)[0].item())
-        effKs = float(self.get_roughness.view(-1)[0].item())
+        rawR = float(self.get_roughness_raw.view(-1)[0].item())
+        effR = float(self.get_roughness.view(-1)[0].item())
 
-        rawSh = float(self.get_metallic_raw.view(-1)[0].item())
-        effSh = float(self.get_metallic.view(-1)[0].item())
+        rawM = float(self.get_metallic_raw.view(-1)[0].item())
+        effM = float(self.get_metallic.view(-1)[0].item())
 
-        # Optional: also report if anything went non-finite
+        # also report if anything went non-finite
         finite = (
             torch.isfinite(self.get_ambient).all()
             and torch.isfinite(self.get_intensity).all()
@@ -201,10 +203,10 @@ class GaussianModel:
             "A_eff": effA,
             "I_raw": rawI,
             "I_eff": effI,
-            "Ks_raw": rawKs,
-            "Ks_eff": effKs,
-            "Sh_raw": rawSh,
-            "Sh_eff": effSh,
+            "R_raw": rawR,
+            "R_eff": effR,
+            "M_raw": rawM,
+            "M_eff": effM,
             "ParamsFinite": bool(finite),
         }
     
@@ -244,8 +246,21 @@ class GaussianModel:
             self.inverse_intensity_activation(torch.ones((1, 1), dtype=torch.float, device="cuda"))
         )
 
-        roughness = self.inverse_opacity_activation(0.10 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
-        metallic = self.inverse_opacity_activation(0.10 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
+        r0 = 0.30 # initialize with sane values
+        m0 = 0.00
+
+        tr = (r0 - self.ROUGHNESS_MIN) / (self.ROUGHNESS_MAX - self.ROUGHNESS_MIN)
+        tm = (m0 - self.METALLIC_MIN) / (self.METALLIC_MAX - self.METALLIC_MIN)
+
+        tr = torch.clamp(torch.tensor(tr, device="cuda", dtype=torch.float32), 1e-4, 1.0 - 1e-4)
+        tm = torch.clamp(torch.tensor(tm, device="cuda", dtype=torch.float32), 1e-4, 1.0 - 1e-4)
+
+        roughness = self.inverse_opacity_activation(
+            tr.expand(N, 1).clone()
+        )
+        metallic = self.inverse_opacity_activation(
+            tm.expand(N, 1).clone()
+        )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
