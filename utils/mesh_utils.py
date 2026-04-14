@@ -18,6 +18,7 @@ from utils.render_utils import save_img_f32, save_img_u8
 from functools import partial
 import open3d as o3d
 import trimesh
+import time
 
 def post_process_mesh(mesh, cluster_to_keep=1000):
     """
@@ -45,27 +46,46 @@ def post_process_mesh(mesh, cluster_to_keep=1000):
 def to_cam_open3d(viewpoint_stack):
     camera_traj = []
     for i, viewpoint_cam in enumerate(viewpoint_stack):
+        print(f"[to_cam_open3d] start {i+1}/{len(viewpoint_stack)}", flush=True)
+
         W = viewpoint_cam.image_width
         H = viewpoint_cam.image_height
-        ndc2pix = torch.tensor([
-            [W / 2, 0, 0, (W-1) / 2],
-            [0, H / 2, 0, (H-1) / 2],
-            [0, 0, 0, 1]]).float().cuda().T
-        intrins =  (viewpoint_cam.projection_matrix @ ndc2pix)[:3,:3].T
-        intrinsic=o3d.camera.PinholeCameraIntrinsic(
-            width=viewpoint_cam.image_width,
-            height=viewpoint_cam.image_height,
-            cx = intrins[0,2].item(),
-            cy = intrins[1,2].item(), 
-            fx = intrins[0,0].item(), 
-            fy = intrins[1,1].item()
-        )
+        print(f"[to_cam_open3d] size: {W} x {H}", flush=True)
 
-        extrinsic=np.asarray((viewpoint_cam.world_view_transform.T).cpu().numpy())
-        camera = o3d.camera.PinholeCameraParameters()
-        camera.extrinsic = extrinsic
-        camera.intrinsic = intrinsic
-        camera_traj.append(camera)
+        proj = viewpoint_cam.projection_matrix.detach().cpu().float()
+        wv = viewpoint_cam.world_view_transform.detach().cpu().float()
+
+        print(f"[to_cam_open3d] proj nan: {torch.isnan(proj).any().item()}", flush=True)
+        print(f"[to_cam_open3d] proj inf: {torch.isinf(proj).any().item()}", flush=True)
+        print(f"[to_cam_open3d] wv nan: {torch.isnan(wv).any().item()}", flush=True)
+        print(f"[to_cam_open3d] wv inf: {torch.isinf(wv).any().item()}", flush=True)
+
+        ndc2pix = torch.tensor([
+            [W / 2, 0, 0, (W - 1) / 2],
+            [0, H / 2, 0, (H - 1) / 2],
+            [0, 0, 0, 1]
+        ], dtype=torch.float32).T
+
+        intrins = (proj @ ndc2pix)[:3, :3].T
+
+        fx = float(intrins[0, 0].item())
+        fy = float(intrins[1, 1].item())
+        cx = float(intrins[0, 2].item())
+        cy = float(intrins[1, 2].item())
+
+        print(f"[to_cam_open3d] fx fy cx cy = {fx}, {fy}, {cx}, {cy}", flush=True)
+
+        intrinsic = o3d.camera.PinholeCameraIntrinsic()
+        intrinsic.set_intrinsics(W, H, fx, fy, cx, cy)
+
+        extrinsic = np.ascontiguousarray(wv.T.numpy(), dtype=np.float64)
+
+        camera_traj.append({
+            "intrinsic": intrinsic,
+            "extrinsic": extrinsic
+        })
+
+        print(f"[to_cam_open3d] done {i+1}/{len(viewpoint_stack)}", flush=True)
 
     return camera_traj
 
@@ -148,36 +168,92 @@ class GaussianExtractor(object):
 
         return o3d.mesh
         """
-        print("Running tsdf volume integration ...")
-        print(f'voxel_size: {voxel_size}')
-        print(f'sdf_trunc: {sdf_trunc}')
-        print(f'depth_truc: {depth_trunc}')
+        print("Running tsdf volume integration ...", flush=True)
+        print(f"voxel_size: {voxel_size}", flush=True)
+        print(f"sdf_trunc: {sdf_trunc}", flush=True)
+        print(f"depth_truc: {depth_trunc}", flush=True)
 
+        print("creating TSDF volume ...", flush=True)
         volume = o3d.pipelines.integration.ScalableTSDFVolume(
-            voxel_length= voxel_size,
+            voxel_length=voxel_size,
             sdf_trunc=sdf_trunc,
             color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
         )
+        print("TSDF volume created", flush=True)
 
-        for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
-            rgb = self.rgbmaps[i]
-            depth = self.depthmaps[i]
+        cams_o3d = to_cam_open3d(self.viewpoint_stack)
+        print(f"number of views: {len(cams_o3d)}", flush=True)
+
+        for i, cam_o3d in enumerate(cams_o3d):
             
-            # if we have mask provided, use it
+            t_view = time.time()
+            print(f"[TSDF] entered loop for view {i+1}/{len(cams_o3d)}", flush=True)
+
+            print(f"[TSDF] getting rgb for view {i+1}", flush=True)
+            rgb = self.rgbmaps[i]
+            print(f"[TSDF] got rgb for view {i+1}", flush=True)
+
+            print(f"[TSDF] getting depth for view {i+1}", flush=True)
+            depth = self.depthmaps[i]
+            print(f"[TSDF] got depth for view {i+1}", flush=True)
+
+            print(f"[TSDF] rgb shape: {tuple(rgb.shape)}", flush=True)
+            print(f"[TSDF] depth shape: {tuple(depth.shape)}", flush=True)
+            print(f"[TSDF] depth min/max: {depth.min().item()} / {depth.max().item()}", flush=True)
+            print(f"[TSDF] depth has nan: {torch.isnan(depth).any().item()}", flush=True)
+            print(f"[TSDF] depth has inf: {torch.isinf(depth).any().item()}", flush=True)
+
             if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
+                print(f"[TSDF] applying mask for view {i+1}", flush=True)
                 depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
+                print(f"[TSDF] mask applied for view {i+1}", flush=True)
 
-            # make open3d rgbd
-            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                o3d.geometry.Image(np.asarray(np.clip(rgb.permute(1,2,0).cpu().numpy(), 0.0, 1.0) * 255, order="C", dtype=np.uint8)),
-                o3d.geometry.Image(np.asarray(depth.permute(1,2,0).cpu().numpy(), order="C")),
-                depth_trunc = depth_trunc, convert_rgb_to_intensity=False,
-                depth_scale = 1.0
+            print(f"[TSDF] converting rgb to numpy for view {i+1}", flush=True)
+            rgb_np = np.asarray(
+                np.clip(rgb.permute(1, 2, 0).cpu().numpy(), 0.0, 1.0) * 255,
+                order="C",
+                dtype=np.uint8
             )
+            print(f"[TSDF] rgb converted for view {i+1}", flush=True)
 
-            volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
+            print(f"[TSDF] converting depth to numpy for view {i+1}", flush=True)
+            depth_np = np.asarray(depth.squeeze(0).cpu().numpy(), dtype=np.float32, order="C")
+            print(f"[TSDF] depth converted for view {i+1}", flush=True)
 
+            print(f"[TSDF] creating Open3D images for view {i+1}", flush=True)
+            color_o3d = o3d.geometry.Image(rgb_np)
+            depth_o3d = o3d.geometry.Image(depth_np)
+            print(f"[TSDF] Open3D images created for view {i+1}", flush=True)
+
+            print(f"[TSDF] creating RGBD for view {i+1}", flush=True)
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                color_o3d,
+                depth_o3d,
+                depth_trunc=depth_trunc,
+                convert_rgb_to_intensity=False,
+                depth_scale=1.0
+            )
+            print(f"[TSDF] RGBD created for view {i+1}", flush=True)
+
+            print("[TSDF] extrinsic for view 1:", flush=True)
+            print(cam_o3d["extrinsic"], flush=True)
+            print("[TSDF] extrinsic det(upper3x3):",
+                np.linalg.det(cam_o3d["extrinsic"][:3, :3]),
+                flush=True)
+            print("[TSDF] rgb_np shape/dtype:", rgb_np.shape, rgb_np.dtype, flush=True)
+            print("[TSDF] depth_np shape/dtype:", depth_np.shape, depth_np.dtype, flush=True)
+
+            print(f"[TSDF] integrating view {i+1}", flush=True)
+            volume.integrate(rgbd, intrinsic=cam_o3d["intrinsic"], extrinsic=cam_o3d["extrinsic"])
+            print(f"[TSDF] finished view {i+1} in {time.time() - t_view:.2f}s", flush=True)
+
+        print("finished TSDF integration", flush=True)
+        print("extracting triangle mesh ...", flush=True)
         mesh = volume.extract_triangle_mesh()
+        print("triangle mesh extracted", flush=True)
+        print(f"mesh verts: {len(mesh.vertices)}", flush=True)
+        print(f"mesh tris: {len(mesh.triangles)}", flush=True)
+
         return mesh
 
     @torch.no_grad()

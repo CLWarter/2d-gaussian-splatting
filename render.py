@@ -84,26 +84,64 @@ if __name__ == "__main__":
                     out_name='render_traj', 
                     num_frames=n_fames)
 
+    import time
+
     if not args.skip_mesh:
-        print("export mesh ...")
+        print("export mesh ...", flush=True)
         os.makedirs(train_dir, exist_ok=True)
-        # set the active_sh to 0 to export only diffuse texture
+
         gaussExtractor.gaussians.active_sh_degree = 0
-        gaussExtractor.reconstruction(scene.getTrainCameras())
-        # extract the mesh and save
+        print("active_sh_degree set to 0", flush=True)
+
+        cams = scene.getTrainCameras()
+        print("num train cams:", len(cams), flush=True)
+
+        t0 = time.time()
+        gaussExtractor.reconstruction(cams)
+        print(f"reconstruction finished in {time.time() - t0:.2f}s", flush=True)
+
         if args.unbounded:
             name = 'fuse_unbounded.ply'
+            print("starting unbounded mesh extraction ...", flush=True)
+            t1 = time.time()
             mesh = gaussExtractor.extract_mesh_unbounded(resolution=args.mesh_res)
+            print(f"unbounded extraction finished in {time.time() - t1:.2f}s", flush=True)
         else:
             name = 'fuse.ply'
-            depth_trunc = (gaussExtractor.radius * 2.0) if args.depth_trunc < 0  else args.depth_trunc
+            depth_trunc = (gaussExtractor.radius * 2.0) if args.depth_trunc < 0 else args.depth_trunc
             voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
             sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc
-            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
-        
-        o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
-        print("mesh saved at {}".format(os.path.join(train_dir, name)))
-        # post-process the mesh and save, saving the largest N clusters
+
+            print("depth_trunc =", depth_trunc, flush=True)
+            print("voxel_size  =", voxel_size, flush=True)
+            print("sdf_trunc   =", sdf_trunc, flush=True)
+
+            print("starting bounded mesh extraction ...", flush=True)
+            t1 = time.time()
+            mesh = gaussExtractor.extract_mesh_bounded(
+                voxel_size=voxel_size,
+                sdf_trunc=sdf_trunc,
+                depth_trunc=depth_trunc
+            )
+            print(f"bounded extraction finished in {time.time() - t1:.2f}s", flush=True)
+
+        print("mesh extracted", flush=True)
+        print("vertices :", len(mesh.vertices), flush=True)
+        print("triangles:", len(mesh.triangles), flush=True)
+
+        mesh_path = os.path.join(train_dir, name)
+        ok = o3d.io.write_triangle_mesh(mesh_path, mesh)
+        print("write ok:", ok, flush=True)
+        print("mesh saved at", mesh_path, flush=True)
+
+        print("starting post process ...", flush=True)
+        t2 = time.time()
         mesh_post = post_process_mesh(mesh, cluster_to_keep=args.num_cluster)
-        o3d.io.write_triangle_mesh(os.path.join(train_dir, name.replace('.ply', '_post.ply')), mesh_post)
-        print("mesh post processed saved at {}".format(os.path.join(train_dir, name.replace('.ply', '_post.ply'))))
+        print(f"post process finished in {time.time() - t2:.2f}s", flush=True)
+
+        post_path = os.path.join(train_dir, name.replace('.ply', '_post.ply'))
+        ok2 = o3d.io.write_triangle_mesh(post_path, mesh_post)
+        print("post write ok:", ok2, flush=True)
+        print("post vertices :", len(mesh_post.vertices), flush=True)
+        print("post triangles:", len(mesh_post.triangles), flush=True)
+        print("mesh post processed saved at", post_path, flush=True)
