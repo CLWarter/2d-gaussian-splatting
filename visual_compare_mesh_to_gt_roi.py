@@ -29,6 +29,35 @@ def sample_points(
     raise ValueError(f"Unknown sampling method: {method}")
 
 
+def expanded_bbox_from_mesh(
+    mesh: o3d.geometry.TriangleMesh,
+    padding: float
+) -> o3d.geometry.AxisAlignedBoundingBox:
+    bbox = mesh.get_axis_aligned_bounding_box()
+    min_b = bbox.get_min_bound() - padding
+    max_b = bbox.get_max_bound() + padding
+    return o3d.geometry.AxisAlignedBoundingBox(min_b, max_b)
+
+
+def filter_pointcloud_by_bbox(
+    pcd: o3d.geometry.PointCloud,
+    bbox: o3d.geometry.AxisAlignedBoundingBox
+) -> o3d.geometry.PointCloud:
+    pts = np.asarray(pcd.points, dtype=np.float64)
+    if pts.size == 0:
+        return o3d.geometry.PointCloud()
+
+    min_b = bbox.get_min_bound()
+    max_b = bbox.get_max_bound()
+
+    mask = np.all((pts >= min_b) & (pts <= max_b), axis=1)
+    filtered_pts = pts[mask]
+
+    out = o3d.geometry.PointCloud()
+    out.points = o3d.utility.Vector3dVector(filtered_pts)
+    return out
+
+
 def compute_distances(
     src_pcd: o3d.geometry.PointCloud,
     dst_pcd: o3d.geometry.PointCloud
@@ -92,7 +121,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Visual mesh-vs-GT comparison.\n"
-            "GT->Pred colors where GT is missing."
+            "GT->Pred colors where GT is missing.\n"
+            "Pred(ROI)->GT colors where prediction has too much/wrong geometry near objects."
         )
     )
     parser.add_argument("--pred_mesh", required=True, type=str, help="Predicted mesh path")
@@ -100,6 +130,12 @@ def main() -> None:
     parser.add_argument("--out_dir", default="visual_mesh_compare_out", type=str)
     parser.add_argument("--sample_points", default=200000, type=int)
     parser.add_argument("--sampling", default="uniform", choices=["uniform", "poisson"])
+    parser.add_argument(
+        "--roi_padding",
+        default=0.2,
+        type=float,
+        help="Padding around GT bbox for ROI-restricted pred->gt visualization"
+    )
     parser.add_argument(
         "--good_thresh",
         default=0.02,
@@ -148,20 +184,43 @@ def main() -> None:
     save_colored_pointcloud(gt_pcd, gt_colors, gt_missing_out)
     print(f"[Save] {gt_missing_out}", flush=True)
 
-    # 2) Pred -> GT (full prediction, no ROI)
-    print("[Compute] Pred -> GT distances", flush=True)
-    pred_to_gt = compute_distances(pred_pcd, gt_pcd)
-    print_stats("Pred -> GT (full prediction extra/wrong-geometry view)", pred_to_gt)
+    # 2) Pred ROI -> GT (too much/wrong local geometry shows up as red on prediction)
+    print("[ROI] Filtering prediction points by GT bbox", flush=True)
+    gt_bbox = expanded_bbox_from_mesh(gt_mesh, padding=args.roi_padding)
+    pred_roi_pcd = filter_pointcloud_by_bbox(pred_pcd, gt_bbox)
 
-    pred_colors = classify_distance_colors(
-        pred_to_gt,
+    pred_roi_count = len(pred_roi_pcd.points)
+    pred_full_count = len(pred_pcd.points)
+    print(
+        f"[ROI] Kept {pred_roi_count}/{pred_full_count} prediction points "
+        f"inside padded GT bbox (padding={args.roi_padding})",
+        flush=True
+    )
+
+    if pred_roi_count == 0:
+        raise ValueError(
+            "No predicted sample points remained inside GT ROI. Increase --roi_padding."
+        )
+
+    print("[Compute] Pred(ROI) -> GT distances", flush=True)
+    pred_roi_to_gt = compute_distances(pred_roi_pcd, gt_pcd)
+    print_stats("Pred(ROI) -> GT (too-much/wrong-local-geometry view)", pred_roi_to_gt)
+
+    pred_roi_colors = classify_distance_colors(
+        pred_roi_to_gt,
         good_thresh=args.good_thresh,
         bad_thresh=args.bad_thresh
     )
 
-    pred_out = os.path.join(args.out_dir, "pred_to_gt_extra_view_full.ply")
-    save_colored_pointcloud(pred_pcd, pred_colors, pred_out)
-    print(f"[Save] {pred_out}", flush=True)
+    pred_roi_out = os.path.join(args.out_dir, "pred_roi_to_gt_extra_view.ply")
+    save_colored_pointcloud(pred_roi_pcd, pred_roi_colors, pred_roi_out)
+    print(f"[Save] {pred_roi_out}", flush=True)
+
+    # Save bbox mesh for optional inspection
+    bbox_lines = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(gt_bbox)
+    bbox_out = os.path.join(args.out_dir, "gt_roi_bbox.ply")
+    o3d.io.write_line_set(bbox_out, bbox_lines)
+    print(f"[Save] {bbox_out}", flush=True)
 
     print("\nInterpretation:", flush=True)
     print("  gt_to_pred_missing_view.ply", flush=True)
@@ -169,17 +228,17 @@ def main() -> None:
     print("    Orange = medium mismatch", flush=True)
     print("    Red    = GT surface is missing / far from prediction", flush=True)
 
-    print("  pred_to_gt_extra_view_full.ply", flush=True)
-    print("    Green  = predicted geometry lies close to GT", flush=True)
-    print("    Orange = medium mismatch", flush=True)
-    print("    Red    = extra / wrong predicted geometry", flush=True)
+    print("  pred_roi_to_gt_extra_view.ply", flush=True)
+    print("    Green  = prediction near objects lies close to GT", flush=True)
+    print("    Orange = medium local mismatch", flush=True)
+    print("    Red    = extra / bloated / wrong local geometry near objects", flush=True)
 
     if args.visualize:
         visualize_two(
             "GT -> Pred (missing view)",
             gt_missing_out,
-            "Pred -> GT (full extra view)",
-            pred_out
+            "Pred ROI -> GT (extra view)",
+            pred_roi_out
         )
 
 

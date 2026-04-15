@@ -27,6 +27,57 @@ from scripts.eval_myOwn.my_eval import (
 OURS_RE = re.compile(r"^ours_(\d+)$")
 
 
+def compute_roi_pred_to_gt_metrics(
+    pred_pcd: o3d.geometry.PointCloud,
+    gt_pcd: o3d.geometry.PointCloud,
+    gt_mesh: o3d.geometry.TriangleMesh,
+    roi_padding: float,
+    threshold: float,
+) -> dict[str, float | str]:
+    gt_bbox = gt_mesh.get_axis_aligned_bounding_box()
+    min_b = gt_bbox.get_min_bound() - roi_padding
+    max_b = gt_bbox.get_max_bound() + roi_padding
+    roi_bbox = o3d.geometry.AxisAlignedBoundingBox(min_b, max_b)
+
+    pred_pts = np.asarray(pred_pcd.points, dtype=np.float64)
+    if pred_pts.size == 0:
+        return {
+            "roi_pred_to_gt_mean": "",
+            "roi_pred_to_gt_median": "",
+            "roi_pred_to_gt_max": "",
+            "roi_precision": "",
+            "roi_num_pred_points": 0,
+        }
+
+    mask = np.all((pred_pts >= min_b) & (pred_pts <= max_b), axis=1)
+    pred_roi_pts = pred_pts[mask]
+
+    if pred_roi_pts.shape[0] == 0:
+        return {
+            "roi_pred_to_gt_mean": "",
+            "roi_pred_to_gt_median": "",
+            "roi_pred_to_gt_max": "",
+            "roi_precision": "",
+            "roi_num_pred_points": 0,
+        }
+
+    pred_roi_pcd = o3d.geometry.PointCloud()
+    pred_roi_pcd.points = o3d.utility.Vector3dVector(pred_roi_pts)
+
+    dists_pred_roi_to_gt = np.asarray(
+        pred_roi_pcd.compute_point_cloud_distance(gt_pcd),
+        dtype=np.float64
+    )
+
+    return {
+        "roi_pred_to_gt_mean": float(np.mean(dists_pred_roi_to_gt)),
+        "roi_pred_to_gt_median": float(np.median(dists_pred_roi_to_gt)),
+        "roi_pred_to_gt_max": float(np.max(dists_pred_roi_to_gt)),
+        "roi_precision": float(np.mean(dists_pred_roi_to_gt < threshold)),
+        "roi_num_pred_points": int(pred_roi_pts.shape[0]),
+    }
+
+
 def find_highest_export_mesh(output_root: Path, mesh_name: str) -> dict[str, str] | None:
     train_dir = output_root / "train"
     if not train_dir.is_dir():
@@ -372,6 +423,7 @@ def evaluate_prediction_against_gt(
     icp_bbox_padding: float,
     use_global_registration: bool,
     global_voxel_size: float,
+    roi_padding: float,
     save_aligned_mesh_path: str | None = None,
     save_transform_path: str | None = None,
 ) -> tuple[
@@ -424,6 +476,15 @@ def evaluate_prediction_against_gt(
     pred_pcd = sample_points(pred_mesh, sample_points_n, method=sampling_method)
     gt_pcd = sample_points(gt_mesh, sample_points_n, method=sampling_method)
 
+    # ROI
+    roi_metrics = compute_roi_pred_to_gt_metrics(
+        pred_pcd=pred_pcd,
+        gt_pcd=gt_pcd,
+        gt_mesh=gt_mesh,
+        roi_padding=roi_padding,
+        threshold=threshold,
+    )
+
     dists_pred_to_gt, dists_gt_to_pred = compute_bidirectional_distances(pred_pcd, gt_pcd)
 
     metrics = compute_metrics_from_distances(
@@ -456,6 +517,8 @@ def evaluate_prediction_against_gt(
         metrics["global_registration_fitness"] = ""
         metrics["global_registration_inlier_rmse"] = ""
         metrics["global_registration_voxel_size"] = ""
+
+    metrics.update(roi_metrics)
 
     return metrics, pred_pcd, gt_pcd, dists_pred_to_gt, dists_gt_to_pred, icp_info
 
@@ -621,6 +684,7 @@ def run_reference_mode(args: argparse.Namespace) -> None:
             icp_bbox_padding=args.icp_bbox_padding,
             use_global_registration=args.align_global_ransac,
             global_voxel_size=args.global_voxel_size,
+            roi_padding=args.roi_padding,
             save_aligned_mesh_path=aligned_mesh_path if args.save_aligned_mesh else None,
             save_transform_path=transform_json_path if args.save_aligned_mesh else None,
         )
@@ -703,6 +767,11 @@ def run_reference_mode(args: argparse.Namespace) -> None:
         rows=rows,
         key_fields=["mesh_a", "mesh_b", "threshold", "sample_points", "sampling_method", "semantics", "aligned_with_icp"],
         fieldnames=default_metric_fieldnames() + [
+            "roi_pred_to_gt_mean",
+            "roi_pred_to_gt_median",
+            "roi_pred_to_gt_max",
+            "roi_precision",
+            "roi_num_pred_points",
             "aligned_with_icp",
             "icp_fitness",
             "icp_inlier_rmse",
@@ -812,6 +881,7 @@ def run_blender_eval_mode(args: argparse.Namespace) -> None:
             icp_bbox_padding=args.icp_bbox_padding,
             use_global_registration=args.align_global_ransac,
             global_voxel_size=args.global_voxel_size,
+            roi_padding=args.roi_padding,
             save_aligned_mesh_path=aligned_mesh_path if args.save_aligned_mesh else None,
             save_transform_path=transform_json_path if args.save_aligned_mesh else None,
         )
@@ -1031,6 +1101,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
         help="Voxel size used for global registration downsampling and FPFH features"
+    )
+    parser.add_argument(
+        "--roi_padding",
+        type=float,
+        default=0.2,
+        help="Padding added to GT object bounding box for ROI-restricted pred->gt metrics"
     )
 
     return parser
