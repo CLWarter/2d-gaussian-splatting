@@ -184,8 +184,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         "#": int(gaussians.get_xyz.shape[0]),
                         "loss": float(ema_loss_for_log),
                         "A_eff": viewer_metrics["A_eff"],
-                        "Ks_eff": viewer_metrics["Ks_eff"],
-                        "Sh_eff": viewer_metrics["Sh_eff"],
+                        "R_eff": viewer_metrics["R_eff"],
+                        "M_eff": viewer_metrics["M_eff"],
                     }
                     # Send the data
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)

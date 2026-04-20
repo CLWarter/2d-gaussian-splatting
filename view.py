@@ -37,23 +37,25 @@ def view(dataset, pipe, iteration):
                     viewer_metrics = gaussians.get_viewer_metrics()
                     metrics_dict = {
                         "#": int(gaussians.get_xyz.shape[0]),
-
                         # viewer/debug
                         #"A_raw": viewer_metrics["A_raw"],
                         "A_eff": viewer_metrics["A_eff"],
                         #"I_raw": viewer_metrics["I_raw"],
                         "I_eff": viewer_metrics["I_eff"],
                         #"Ks_raw": viewer_metrics["Ks_raw"],
-                        "Ks_eff": viewer_metrics["Ks_eff"],
+                        #"R_eff": viewer_metrics["R_eff"],
                         #"Sh_raw": viewer_metrics["Sh_raw"],
-                        "Sh_eff": viewer_metrics["Sh_eff"],
+                        #"M_eff": viewer_metrics["M_eff"],
                         #"ParamsFinite": viewer_metrics["ParamsFinite"],
                     }
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
+                except BlockingIOError:
+                    print("socket would block")
+                    continue
                 except Exception as e:
-                    raise e
-                    print('Viewer closed')
-                    exit(0)
+                    print(f'Viewer connection error: {e}')
+                    network_gui.conn = None
+                    break
 
 if __name__ == "__main__":
 
