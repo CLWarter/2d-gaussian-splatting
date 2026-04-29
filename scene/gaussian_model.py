@@ -234,32 +234,34 @@ class GaussianModel:
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         N = fused_point_cloud.shape[0]
-        amax = 0.25
-        a0 = 0.02
-        t0 = a0 / amax  # must be in (0,1)
 
-        ambient = torch.nn.Parameter(
-            self.inverse_opacity_activation(torch.tensor([[t0]], device="cuda", dtype=torch.float32))
+        # Ambient: raw parameter. CUDA applies effective mapping.
+        ambient_raw_init = self.inverse_opacity_activation(
+            torch.tensor([[0.02 / 0.25]], device="cuda", dtype=torch.float32)
         )
 
-        intensity = torch.nn.Parameter(
-            self.inverse_intensity_activation(torch.ones((1, 1), dtype=torch.float, device="cuda"))
+        # Intensity: raw parameter. CUDA softplus maps this to effective intensity.
+        intensity_raw_init = self.inverse_intensity_activation(
+            torch.ones((1, 1), dtype=torch.float32, device="cuda")
         )
 
-        r0 = 0.30 # initialize with sane values
-        m0 = 0.00
+        # Roughness / metallic: raw learnable per-Gaussian parameters.
+        # No Python-side min/max mapping here.
+        roughness_raw_init = 0.0
+        metallic_raw_init = 0.0
 
-        tr = (r0 - self.ROUGHNESS_MIN) / (self.ROUGHNESS_MAX - self.ROUGHNESS_MIN)
-        tm = (m0 - self.METALLIC_MIN) / (self.METALLIC_MAX - self.METALLIC_MIN)
-
-        tr = torch.clamp(torch.tensor(tr, device="cuda", dtype=torch.float32), 1e-4, 1.0 - 1e-4)
-        tm = torch.clamp(torch.tensor(tm, device="cuda", dtype=torch.float32), 1e-4, 1.0 - 1e-4)
-
-        roughness = self.inverse_opacity_activation(
-            tr.expand(N, 1).clone()
+        roughness = torch.full(
+            (N, 1),
+            roughness_raw_init,
+            dtype=torch.float32,
+            device="cuda"
         )
-        metallic = self.inverse_opacity_activation(
-            tm.expand(N, 1).clone()
+
+        metallic = torch.full(
+            (N, 1),
+            metallic_raw_init,
+            dtype=torch.float32,
+            device="cuda"
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -268,8 +270,8 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self._ambient = nn.Parameter(ambient.requires_grad_(True))
-        self._intensity = nn.Parameter(intensity.requires_grad_(True))
+        self._ambient = nn.Parameter(ambient_raw_init.requires_grad_(True))
+        self._intensity = nn.Parameter(intensity_raw_init.requires_grad_(True))
         self._roughness = nn.Parameter(roughness.requires_grad_(True))
         self._metallic = nn.Parameter(metallic.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
