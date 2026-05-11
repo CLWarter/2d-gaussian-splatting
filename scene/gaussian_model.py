@@ -248,7 +248,7 @@ class GaussianModel:
         # Roughness / metallic: raw learnable per-Gaussian parameters.
         # No Python-side min/max mapping here.
         roughness_raw_init = 0.0
-        metallic_raw_init = 0.0
+        metallic_raw_init = -3.0
 
         roughness = torch.full(
             (N, 1),
@@ -307,6 +307,117 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
+            
+    @torch.no_grad()
+    def update_material_clusters(
+        self,
+        num_clusters: int = 32,
+        iters: int = 8,
+        use_position: bool = True,
+        use_color: bool = True,
+        use_material: bool = True,
+    ):
+        """
+        Assign each Gaussian to a material-like cluster.
+
+        This is NOT a hard material parameter sharing system.
+        It only creates cluster IDs used by a consistency loss.
+        """
+
+        N = self.get_xyz.shape[0]
+        if N == 0:
+            self.material_cluster_ids = None
+            return
+
+        K = min(num_clusters, N)
+
+        feats = []
+
+        if use_position:
+            xyz = self.get_xyz.detach()
+            xyz = (xyz - xyz.mean(dim=0, keepdim=True)) / (xyz.std(dim=0, keepdim=True) + 1e-6)
+            feats.append(0.5 * xyz)
+
+        if use_color:
+            # DC color proxy. This is in SH space, but still useful as a rough grouping feature.
+            color = self._features_dc.detach().squeeze(1)
+            color = (color - color.mean(dim=0, keepdim=True)) / (color.std(dim=0, keepdim=True) + 1e-6)
+            feats.append(1.0 * color)
+
+        if use_material:
+            r = self.get_roughness.detach()
+            m = self.get_metallic.detach()
+            mat = torch.cat([r, m], dim=1)
+            mat = (mat - mat.mean(dim=0, keepdim=True)) / (mat.std(dim=0, keepdim=True) + 1e-6)
+            feats.append(0.8 * mat)
+
+        X = torch.cat(feats, dim=1).contiguous()
+
+        # Random init. Good enough for regularization.
+        perm = torch.randperm(N, device=X.device)[:K]
+        centers = X[perm].clone()
+
+        for _ in range(iters):
+            # distances: [N, K]
+            d2 = torch.cdist(X, centers, p=2.0)
+            ids = torch.argmin(d2, dim=1)
+
+            new_centers = centers.clone()
+            for k in range(K):
+                mask = ids == k
+                if mask.any():
+                    new_centers[k] = X[mask].mean(dim=0)
+            centers = new_centers
+
+        self.material_cluster_ids = ids.detach()
+
+
+    def material_consistency_loss(
+        self,
+        lambda_roughness: float = 0.01,
+        lambda_metallic: float = 0.01,
+        min_cluster_size: int = 8,
+    ):
+        """
+        Penalizes roughness/metallic variance inside inferred material clusters.
+        Keeps parameters per-Gaussian, but makes same-cluster values more consistent.
+        """
+
+        if not hasattr(self, "material_cluster_ids"):
+            return self._roughness.sum() * 0.0
+
+        ids = self.material_cluster_ids
+        if ids is None:
+            return self._roughness.sum() * 0.0
+
+        if ids.shape[0] != self.get_xyz.shape[0]:
+            return self._roughness.sum() * 0.0
+
+        rough = self.get_roughness.squeeze(-1)
+        metal = self.get_metallic.squeeze(-1)
+
+        loss = rough.sum() * 0.0
+        K = int(ids.max().item()) + 1
+
+        valid_clusters = 0
+
+        for k in range(K):
+            mask = ids == k
+            if int(mask.sum().item()) < min_cluster_size:
+                continue
+
+            r = rough[mask]
+            m = metal[mask]
+
+            loss = loss + lambda_roughness * ((r - r.mean()) ** 2).mean()
+            loss = loss + lambda_metallic * ((m - m.mean()) ** 2).mean()
+            valid_clusters += 1
+
+        if valid_clusters == 0:
+            return rough.sum() * 0.0
+
+        return loss / valid_clusters
+
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']

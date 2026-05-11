@@ -115,6 +115,10 @@ class GaussianExtractor(object):
         self.normals = []
         self.depth_normals = []
         self.viewpoint_stack = []
+        self.metallicmaps = []
+        self.metallic_color_maps = []
+        self.roughnessmaps = []
+        self.roughness_color_maps = []
 
     @torch.no_grad()
     def reconstruction(self, viewpoint_stack):
@@ -135,6 +139,25 @@ class GaussianExtractor(object):
             self.alphamaps.append(alpha.cpu())
             self.normals.append(normal.cpu())
             self.depth_normals.append(depth_normal.cpu())
+            if "rend_metallic" in render_pkg:
+                self.metallicmaps.append(render_pkg["rend_metallic"].cpu())
+            else:
+                self.metallicmaps.append(None)
+
+            if "rend_metallic_color" in render_pkg:
+                self.metallic_color_maps.append(render_pkg["rend_metallic_color"].cpu())
+            else:
+                self.metallic_color_maps.append(None)
+
+            if "rend_roughness" in render_pkg:
+                self.roughnessmaps.append(render_pkg["rend_roughness"].cpu())
+            else:
+                self.roughnessmaps.append(None)
+
+            if "rend_roughness_color" in render_pkg:
+                self.roughness_color_maps.append(render_pkg["rend_roughness_color"].cpu())
+            else:
+                self.roughness_color_maps.append(None)
         
         # self.rgbmaps = torch.stack(self.rgbmaps, dim=0)
         # self.depthmaps = torch.stack(self.depthmaps, dim=0)
@@ -360,10 +383,18 @@ class GaussianExtractor(object):
         gts_path = os.path.join(path, "gt")
         vis_path = os.path.join(path, "vis")
         alpha_path  = os.path.join(path, "alpha")   # 🔹 new
+        metallic_path = os.path.join(path, "metallic")
+        metallic_color_path = os.path.join(path, "metallic_color")
+        roughness_path = os.path.join(path, "roughness")
+        roughness_color_path = os.path.join(path, "roughness_color")
         os.makedirs(render_path, exist_ok=True)
         os.makedirs(vis_path, exist_ok=True)
         os.makedirs(gts_path, exist_ok=True)
         os.makedirs(alpha_path, exist_ok=True)      # 🔹 new
+        os.makedirs(metallic_path, exist_ok=True)
+        os.makedirs(metallic_color_path, exist_ok=True)
+        os.makedirs(roughness_path, exist_ok=True)
+        os.makedirs(roughness_color_path, exist_ok=True)
         for idx, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="export images"):
             gt = viewpoint_cam.original_image[0:3, :, :]
             save_img_u8(gt.permute(1,2,0).cpu().numpy(), os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
@@ -377,3 +408,30 @@ class GaussianExtractor(object):
             
             save_img_u8(self.normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'normal_{0:05d}'.format(idx) + ".png"))
             save_img_u8(self.depth_normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'depth_normal_{0:05d}'.format(idx) + ".png"))
+            if idx < len(self.metallicmaps) and self.metallicmaps[idx] is not None:
+                metallic = self.metallicmaps[idx][0].cpu().numpy()
+                save_img_f32(
+                    metallic,
+                    os.path.join(metallic_path, "metallic_{0:05d}.tiff".format(idx))
+                )
+
+            if idx < len(self.metallic_color_maps) and self.metallic_color_maps[idx] is not None:
+                metallic_color = self.metallic_color_maps[idx].permute(1, 2, 0).cpu().numpy()
+                save_img_u8(
+                    metallic_color,
+                    os.path.join(metallic_color_path, "metallic_color_{0:05d}.png".format(idx))
+                )
+
+            if idx < len(self.roughnessmaps) and self.roughnessmaps[idx] is not None:
+                roughness = self.roughnessmaps[idx][0].cpu().numpy()
+                save_img_f32(
+                    roughness,
+                    os.path.join(roughness_path, "roughness_{0:05d}.tiff".format(idx))
+                )
+
+            if idx < len(self.roughness_color_maps) and self.roughness_color_maps[idx] is not None:
+                roughness_color = self.roughness_color_maps[idx].permute(1, 2, 0).cpu().numpy()
+                save_img_u8(
+                    roughness_color,
+                    os.path.join(roughness_color_path, "roughness_color_{0:05d}.png".format(idx))
+                )

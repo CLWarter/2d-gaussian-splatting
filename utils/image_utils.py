@@ -53,6 +53,14 @@ def render_net_image(render_pkg, render_items, render_mode, camera):
         net_image = render_pkg["rend_normal"]
         net_image = (net_image+1)/2
         net_image = gradient_map(net_image)
+    elif output == 'metallic':
+        net_image = render_pkg["rend_metallic"]
+    elif output == 'metalliccolor':
+        net_image = render_pkg["rend_metallic_color"]
+    elif output == 'roughness':
+        net_image = render_pkg["rend_roughness"]
+    elif output == 'roughnesscolor':
+        net_image = render_pkg["rend_roughness_color"]
     else:
         net_image = render_pkg["render"]
 

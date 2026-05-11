@@ -30,6 +30,8 @@ def view(dataset, pipe, iteration):
                 try:
                     net_image_bytes = None
                     custom_cam, do_training, keep_alive, scaling_modifer, render_mode = network_gui.receive()
+                    if custom_cam is None:
+                        continue
                     if custom_cam != None:
                         render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer)
                         net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)

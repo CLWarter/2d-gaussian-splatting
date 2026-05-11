@@ -54,7 +54,8 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
-        self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+        self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature',
+                             'Metallic', 'MetallicColor', 'Roughness', 'RoughnessColor',]
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -82,13 +83,18 @@ class OptimizationParams(ParamGroup):
         self.ambient_lr = 0.001
         self.intensity_lr = 0.2
         self.roughness_lr = 0.001
-        self.metallic_lr = 0.00002
+        self.metallic_lr = 0.0005
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
+        self.lambda_material_roughness = 0.001
+        self.lambda_material_metallic = 0.001
+        self.material_cluster_count = 32
+        self.material_cluster_start = 7000
+        self.material_cluster_interval = 500
         self.opacity_cull = 0.05
 
         self.densification_interval = 100

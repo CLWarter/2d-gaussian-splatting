@@ -16,6 +16,37 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
 
+def material_band_colormap(x):
+    """
+    x: [1,H,W] in [0,1]
+    returns [3,H,W] with 0.1 color bands
+    """
+    x = torch.clamp(x, 0.0, 1.0)
+    q = torch.floor(x * 10.0 + 0.5) / 10.0
+
+    out = torch.zeros((3, q.shape[1], q.shape[2]), device=q.device, dtype=q.dtype)
+
+    v = q[0]
+
+    def put(mask, r, g, b):
+        out[0][mask] = r
+        out[1][mask] = g
+        out[2][mask] = b
+
+    put(v < 0.05, 0.0, 0.0, 0.0)
+    put((v >= 0.05) & (v < 0.15), 0.0, 0.0, 1.0)
+    put((v >= 0.15) & (v < 0.25), 0.0, 1.0, 1.0)
+    put((v >= 0.25) & (v < 0.35), 0.0, 1.0, 0.0)
+    put((v >= 0.35) & (v < 0.45), 0.5, 1.0, 0.0)
+    put((v >= 0.45) & (v < 0.55), 1.0, 1.0, 0.0)
+    put((v >= 0.55) & (v < 0.65), 1.0, 0.5, 0.0)
+    put((v >= 0.65) & (v < 0.75), 1.0, 0.25, 0.0)
+    put((v >= 0.75) & (v < 0.85), 1.0, 0.0, 0.0)
+    put((v >= 0.85) & (v < 0.95), 1.0, 0.0, 1.0)
+    put(v >= 0.95, 1.0, 1.0, 1.0)
+
+    return out
+
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
     """
     Render the scene. 
@@ -141,6 +172,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # get depth distortion map
     render_dist = allmap[6:7]
 
+    render_metallic = None
+    render_roughness = None
+
+    if allmap.shape[0] > 7:
+        render_metallic = torch.clamp(allmap[7:8], 0.0, 1.0)
+
+    if allmap.shape[0] > 8:
+        render_roughness = torch.clamp(allmap[8:9], 0.0, 1.0)
+
     # psedo surface attributes
     # surf depth is either median or expected by setting depth_ratio to 1 or 0
     # for bounded scene, use median depth, i.e., depth_ratio = 1; 
@@ -153,12 +193,22 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # remember to multiply with accum_alpha since render_normal is unnormalized.
     surf_normal = surf_normal * (render_alpha).detach()
 
-    rets.update({
-            'rend_alpha': render_alpha,
-            'rend_normal': render_normal,
-            'rend_dist': render_dist,
-            'surf_depth': surf_depth,
-            'surf_normal': surf_normal,
-    })
+    extra = {
+        'rend_alpha': render_alpha,
+        'rend_normal': render_normal,
+        'rend_dist': render_dist,
+        'surf_depth': surf_depth,
+        'surf_normal': surf_normal,
+    }
+
+    if render_metallic is not None:
+        extra["rend_metallic"] = render_metallic
+        extra["rend_metallic_color"] = material_band_colormap(render_metallic)
+
+    if render_roughness is not None:
+        extra["rend_roughness"] = render_roughness
+        extra["rend_roughness_color"] = material_band_colormap(render_roughness)
+
+    rets.update(extra)
 
     return rets

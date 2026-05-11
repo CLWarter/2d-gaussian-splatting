@@ -101,8 +101,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
+        material_loss = torch.tensor(0.0, device="cuda")
+
+        if iteration >= opt.material_cluster_start:
+            if iteration == opt.material_cluster_start or iteration % opt.material_cluster_interval == 0:
+                gaussians.update_material_clusters(
+                    num_clusters=opt.material_cluster_count,
+                    iters=8,
+                    use_position=True,
+                    use_color=True,
+                    use_material=True,
+                )
+
+            material_loss = gaussians.material_consistency_loss(
+                lambda_roughness=opt.lambda_material_roughness,
+                lambda_metallic=opt.lambda_material_metallic,
+                min_cluster_size=8,
+            )
+
         # loss
-        total_loss = loss + dist_loss + normal_loss
+        total_loss = loss + dist_loss + normal_loss + material_loss
         
         total_loss.backward()
 
@@ -132,6 +150,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if tb_writer is not None:
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/material_loss', material_loss.item(), iteration)
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
