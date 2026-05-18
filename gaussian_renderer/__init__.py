@@ -181,6 +181,27 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     if allmap.shape[0] > 8:
         render_roughness = torch.clamp(allmap[8:9], 0.0, 1.0)
 
+    # Mask invalid / transparent surface pixels for exported material maps.
+    # These defaults are material-safe:
+    #   metallic  = 0.0   dielectric
+    #   roughness = 0.5   neutral roughness
+    if render_metallic is not None or render_roughness is not None:
+        material_valid = render_alpha > 0.5
+
+        if render_metallic is not None:
+            render_metallic = torch.where(
+                material_valid,
+                render_metallic,
+                torch.zeros_like(render_metallic)
+            )
+
+        if render_roughness is not None:
+            render_roughness = torch.where(
+                material_valid,
+                render_roughness,
+                torch.full_like(render_roughness, 0.5)
+            )
+
     # psedo surface attributes
     # surf depth is either median or expected by setting depth_ratio to 1 or 0
     # for bounded scene, use median depth, i.e., depth_ratio = 1; 

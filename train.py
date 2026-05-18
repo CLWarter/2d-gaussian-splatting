@@ -120,7 +120,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             )
 
         # loss
-        total_loss = loss + dist_loss + normal_loss + material_loss
+        total_loss = loss + dist_loss + normal_loss #+ material_loss
         
         total_loss.backward()
 
