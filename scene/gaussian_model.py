@@ -63,6 +63,13 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
 
+    def init_gaussian_luma_buffers(self):
+        N = self.get_xyz.shape[0]
+
+        self._gauss_luma_ema = torch.zeros((N, 1), device="cuda")
+        self._gauss_luma2_ema = torch.zeros((N, 1), device="cuda")
+        self._gauss_luma_weight_ema = torch.zeros((N, 1), device="cuda")
+
     def capture(self):
         return (
             self.active_sh_degree,
@@ -213,44 +220,6 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
 
-    # ------------------------------------------------------------------
-    # GS-2M photometric variance supervision
-    # Accumulate a per-pixel EMA of rendered luminance across training views.
-    # High variance at a pixel → that surface point is specular → roughness
-    # should be low. This gives a consistent cross-view roughness signal that
-    # persists even when the camera is not at the specular peak in the current
-    # iteration.
-    # ------------------------------------------------------------------
-
-    def update_photometric_ema(self, luma: torch.Tensor, decay: float = 0.97) -> None:
-        """Update running EMA of per-pixel luminance.
-
-        Args:
-            luma:  (1, H, W) rendered luminance (float32, CUDA).
-            decay: EMA decay factor (high = slow adaptation; 0.97 works well).
-        """
-        if not hasattr(self, "_pvar_luma_ema") or self._pvar_luma_ema is None:
-            self._pvar_luma_ema  = luma.clone()
-            self._pvar_luma2_ema = (luma * luma).clone()
-        else:
-            # Different cameras may have different resolutions. Resize the
-            # incoming luma to match the stored EMA rather than resetting —
-            # resetting would discard all accumulated history.
-            if self._pvar_luma_ema.shape != luma.shape:
-                luma = torch.nn.functional.interpolate(
-                    luma.unsqueeze(0), size=self._pvar_luma_ema.shape[-2:],
-                    mode='bilinear', align_corners=False
-                ).squeeze(0)
-            self._pvar_luma_ema  = decay * self._pvar_luma_ema  + (1.0 - decay) * luma
-            self._pvar_luma2_ema = decay * self._pvar_luma2_ema + (1.0 - decay) * (luma * luma)
-
-    def get_photometric_variance(self) -> torch.Tensor | None:
-        """Return Var[luma] = E[L²] - E[L]² per pixel, or None if not yet initialized."""
-        if not hasattr(self, "_pvar_luma_ema") or self._pvar_luma_ema is None:
-            return None
-        var = self._pvar_luma2_ema - self._pvar_luma_ema ** 2
-        return var.clamp(min=0.0)
-
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -294,8 +263,8 @@ class GaussianModel:
         metal_min = 0.00   # must match LIGHT_GGX_METALLIC_MIN
         metal_max = 1.00   # must match LIGHT_GGX_METALLIC_MAX
 
-        rough_init_value = 0.20
-        metal_init_value = 0.25
+        rough_init_value = 0.45
+        metal_init_value = 0.05
 
         rough_t = torch.tensor(
             (rough_init_value - rough_min) / (rough_max - rough_min),
@@ -337,6 +306,7 @@ class GaussianModel:
         self._roughness = nn.Parameter(roughness.requires_grad_(True))
         self._metallic = nn.Parameter(metallic.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.init_gaussian_luma_buffers()
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -369,6 +339,50 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
+    
+    @torch.no_grad()
+    def update_gaussian_luma_ema(
+        self,
+        gauss_luma_sum: torch.Tensor,
+        gauss_luma2_sum: torch.Tensor,
+        gauss_weight_sum: torch.Tensor,
+        decay: float = 0.97,
+        min_weight: float = 1e-6,
+    ):
+        if not hasattr(self, "_gauss_luma_ema") or self._gauss_luma_ema.shape[0] != self.get_xyz.shape[0]:
+            self.init_gaussian_luma_buffers()
+
+        valid = gauss_weight_sum > min_weight
+        if not valid.any():
+            return
+
+        w = gauss_weight_sum.clamp_min(min_weight)
+
+        luma_mean = gauss_luma_sum / w
+        luma2_mean = gauss_luma2_sum / w
+
+        self._gauss_luma_ema[valid] = (
+            decay * self._gauss_luma_ema[valid]
+            + (1.0 - decay) * luma_mean[valid]
+        )
+
+        self._gauss_luma2_ema[valid] = (
+            decay * self._gauss_luma2_ema[valid]
+            + (1.0 - decay) * luma2_mean[valid]
+        )
+
+        self._gauss_luma_weight_ema[valid] = (
+            decay * self._gauss_luma_weight_ema[valid]
+            + (1.0 - decay) * gauss_weight_sum[valid]
+        )
+
+    @property
+    def get_gaussian_luma_variance(self):
+        if not hasattr(self, "_gauss_luma_ema"):
+            return torch.zeros_like(self._roughness)
+
+        var = self._gauss_luma2_ema - self._gauss_luma_ema ** 2
+        return var.clamp_min(0.0)
             
     @torch.no_grad()
     def update_material_clusters(
@@ -590,6 +604,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+        self.init_gaussian_luma_buffers()
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -646,10 +661,29 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        N_after = self.get_xyz.shape[0]
 
-        self.denom = self.denom[valid_points_mask]
-        self.max_radii2D = self.max_radii2D[valid_points_mask]
+        if self.xyz_gradient_accum.shape[0] == valid_points_mask.shape[0]:
+            self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        else:
+            self.xyz_gradient_accum = torch.zeros((N_after, 1), device="cuda")
+
+        if self.denom.shape[0] == valid_points_mask.shape[0]:
+            self.denom = self.denom[valid_points_mask]
+        else:
+            self.denom = torch.zeros((N_after, 1), device="cuda")
+
+        if self.max_radii2D.shape[0] == valid_points_mask.shape[0]:
+            self.max_radii2D = self.max_radii2D[valid_points_mask]
+        else:
+            self.max_radii2D = torch.zeros((N_after), device="cuda")
+
+        if hasattr(self, "_gauss_luma_ema") and self._gauss_luma_ema.shape[0] == valid_points_mask.shape[0]:
+            self._gauss_luma_ema = self._gauss_luma_ema[valid_points_mask]
+            self._gauss_luma2_ema = self._gauss_luma2_ema[valid_points_mask]
+            self._gauss_luma_weight_ema = self._gauss_luma_weight_ema[valid_points_mask]
+        else:
+            self.init_gaussian_luma_buffers()
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -700,9 +734,13 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.init_gaussian_luma_buffers()
+
+        N = self.get_xyz.shape[0]
+
+        self._gauss_luma_ema = torch.zeros((N, 1), device="cuda")
+        self._gauss_luma2_ema = torch.zeros((N, 1), device="cuda")
+        self._gauss_luma_weight_ema = torch.zeros((N, 1), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]

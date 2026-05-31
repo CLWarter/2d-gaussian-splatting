@@ -83,10 +83,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
         gt_image = viewpoint_cam.original_image.cuda()
+
+        render_pkg = render(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            background,
+            gt_image=gt_image,
+            collect_gaussian_luma=True,
+        )
+
+        image = render_pkg["render"]
+        viewspace_point_tensor = render_pkg["viewspace_points"]
+        visibility_filter = render_pkg["visibility_filter"]
+        radii = render_pkg["radii"]
 
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
@@ -118,6 +129,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         dist_loss = lambda_dist * (rend_dist).mean()
 
         material_loss = torch.tensor(0.0, device="cuda")
+        loss_gauss_var = torch.tensor(0.0, device="cuda")
 
         if iteration >= opt.material_cluster_start:
             if iteration == opt.material_cluster_start or iteration % opt.material_cluster_interval == 0:
@@ -135,50 +147,66 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 min_cluster_size=8,
             )
 
-        # GS-2M photometric variance supervision (computed BEFORE backward).
-        # Reads the variance map built from PREVIOUS iterations' renders —
-        # a pixel with historically high luminance variance is a specular region
-        # whose Gaussians should have low roughness.  The gradient of this extra
-        # loss flows back through the rendered specular → roughness/metallic,
-        # giving a cross-view signal that persists even when the current camera
-        # is not at the specular peak.
-        loss_var = torch.tensor(0.0, device="cuda")
-        if (iteration >= opt.material_warmup_iters and opt.lambda_variance > 0.0):
-            pvar = gaussians.get_photometric_variance()   # (1,H,W) from prev iters
-            if pvar is not None:
-                # Cameras may have slightly different resolutions; resize to match.
-                if pvar.shape[-2:] != image.shape[-2:]:
-                    pvar = torch.nn.functional.interpolate(
-                        pvar.unsqueeze(0), size=image.shape[-2:],
-                        mode='bilinear', align_corners=False
-                    ).squeeze(0)
-                pvar_norm = pvar / (pvar.max() + 1e-6)
-                var_mask = (pvar_norm > opt.variance_threshold).float()
-                loss_var = (var_mask * torch.abs(image - gt_image)).sum() / (
-                    var_mask.sum() * image.shape[0] + 1e-6
-                )
-                loss = loss + opt.lambda_variance * loss_var
+        if iteration > opt.gauss_variance_start and opt.lambda_gauss_variance > 0.0:
+            var = gaussians.get_gaussian_luma_variance.detach()
+
+            if var.numel() > 0:
+                scale = torch.quantile(var.flatten(), 0.95).clamp_min(1e-6)
+                var_norm = (var / scale).clamp(0.0, 1.0)
+
+                rough = gaussians.get_roughness
+
+                # High luminance variance -> prefer sharper/specular-compatible roughness.
+                target_rough = 0.20 + 0.40 * (1.0 - var_norm)
+
+                loss_gauss_var = (
+                    var_norm * (rough - target_rough).pow(2)
+                ).mean()
+        
+        loss_highlight_rough = torch.tensor(0.0, device="cuda")
+
+        if iteration > 1000:
+            gt_luma = gt_image.mean(dim=0, keepdim=True)
+            pred_luma = image.mean(dim=0, keepdim=True)
+
+            # bright GT regions
+            highlight_mask = (gt_luma > opt.highlight_threshold).float()
+
+            # only where render is still too dark
+            missing_highlight = torch.relu(gt_luma - pred_luma)
+
+            # per-pixel roughness map from renderer
+            rough_map = render_pkg.get("rend_roughness", None)
+
+            if rough_map is not None:
+                # only penalize roughness above 0.45 in highlight-missing regions
+                rough_excess = torch.relu(rough_map - 0.45)
+
+                denom = highlight_mask.sum().clamp_min(1.0)
+
+                loss_highlight_rough = (
+                    highlight_mask * missing_highlight.detach() * rough_excess.pow(2)
+                ).sum() / denom
 
         # loss
         total_loss = loss + dist_loss + normal_loss + material_loss
+        total_loss = total_loss + opt.lambda_gauss_variance * loss_gauss_var
+        total_loss = total_loss + opt.lambda_highlight_roughness * loss_highlight_rough
         
         total_loss.backward()
 
-        # Update photometric EMA AFTER backward so current render feeds next iteration.
-        if iteration >= opt.material_warmup_iters:
+        if "gauss_luma_sum" in render_pkg:
             with torch.no_grad():
-                rendered_luma = image.detach().mean(dim=0, keepdim=True)   # (1,H,W)
-                gaussians.update_photometric_ema(rendered_luma, decay=opt.variance_ema_decay)
+                gaussians.update_gaussian_luma_ema(
+                    render_pkg["gauss_luma_sum"],
+                    render_pkg["gauss_luma2_sum"],
+                    render_pkg["gauss_luma_weight_sum"],
+                    decay=opt.variance_ema_decay,
+                )
 
-        # Material warmup: freeze roughness, metallic, and intensity for the
+        # Material warmup: freeze roughness, metallic for the
         # first material_warmup_iters iterations so albedo, geometry and opacity
         # converge to correct per-object colors against a fixed light level.
-        #
-        # Intensity must be frozen from iter 0 — if it is free while materials
-        # are frozen it shoots up immediately (it is the easiest lever to reduce
-        # the loss when roughness/metallic cannot move), and stays inflated even
-        # after materials are released, destroying metrics.
-        #
         # Albedo absorbs any brightness mismatch against the fixed initial
         # intensity, which is exactly its job during warmup.
         if iteration < opt.material_warmup_iters:

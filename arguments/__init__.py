@@ -93,16 +93,17 @@ class OptimizationParams(ParamGroup):
         self.lambda_material_roughness = 0.0
         self.lambda_material_metallic = 0.0
         self.lambda_highlight = 0.5
+        self.lambda_highlight_roughness = 0.01
         self.highlight_threshold = 0.65
-        self.lambda_variance = 0.3
-        self.variance_threshold = 0.15
-        self.variance_ema_decay = 0.97
         self.intensity_settle_iters = 500
         self.material_cluster_count = 64
         self.material_cluster_start = 8000
         self.material_cluster_interval = 1000
-        self.material_warmup_iters = 3000
+        self.material_warmup_iters = 2500
         self.opacity_cull = 0.05
+        self.lambda_gauss_variance = 0.001
+        self.gauss_variance_start = 2000
+        self.variance_ema_decay = 0.97
 
         self.densification_interval = 200
         self.opacity_reset_interval = 3000

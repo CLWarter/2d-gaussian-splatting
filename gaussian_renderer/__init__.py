@@ -47,7 +47,8 @@ def material_band_colormap(x):
 
     return out
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, gt_image=None,
+    collect_gaussian_luma=False,):
     """
     Render the scene. 
     
@@ -129,6 +130,20 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         colors_precomp = override_color
 
+    N = pc.get_xyz.shape[0]
+
+    if collect_gaussian_luma and gt_image is not None:
+        gt_luma = gt_image.detach().mean(dim=0, keepdim=True).contiguous()
+
+        gauss_luma_sum = torch.zeros((N, 1), device="cuda", dtype=torch.float32)
+        gauss_luma2_sum = torch.zeros((N, 1), device="cuda", dtype=torch.float32)
+        gauss_luma_weight_sum = torch.zeros((N, 1), device="cuda", dtype=torch.float32)
+    else:
+        gt_luma = torch.empty(0, device="cuda", dtype=torch.float32)
+        gauss_luma_sum = torch.empty(0, device="cuda", dtype=torch.float32)
+        gauss_luma2_sum = torch.empty(0, device="cuda", dtype=torch.float32)
+        gauss_luma_weight_sum = torch.empty(0, device="cuda", dtype=torch.float32)
+
     rendered_image, radii, allmap = rasterizer(
         means3D = means3D,
         means2D = means2D,
@@ -141,7 +156,11 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         metallic = metallic,
         scales = scales,
         rotations = rotations,
-        cov3D_precomp = cov3D_precomp
+        cov3D_precomp = cov3D_precomp,
+        gt_luma=gt_luma,
+        gauss_luma_sum=gauss_luma_sum,
+        gauss_luma2_sum=gauss_luma2_sum,
+        gauss_luma_weight_sum=gauss_luma_weight_sum
     )
     
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
@@ -151,6 +170,11 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "visibility_filter" : radii > 0,
             "radii": radii,
     }
+
+    if collect_gaussian_luma and gt_image is not None:
+        rets["gauss_luma_sum"] = gauss_luma_sum
+        rets["gauss_luma2_sum"] = gauss_luma2_sum
+        rets["gauss_luma_weight_sum"] = gauss_luma_weight_sum
 
     # additional regularizations
     render_alpha = allmap[1:2]
