@@ -87,9 +87,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         gt_image = viewpoint_cam.original_image.cuda()
+
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        
+
+        # Highlight-aware photometric loss.
+        # Gives sparse bright specular regions a stronger training signal so
+        # roughness/metallic receive gradient even when those pixels are a small
+        # fraction of the image.
+        gt_luma = gt_image.mean(dim=0, keepdim=True)
+        highlight_mask = (gt_luma > opt.highlight_threshold).float()
+
+        highlight_denom = highlight_mask.sum() * image.shape[0] + 1e-6
+
+        loss_highlight = (
+            highlight_mask * torch.abs(image - gt_image)
+        ).sum() / highlight_denom
+
+        #loss = loss + opt.lambda_highlight * loss_highlight
+
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
@@ -119,10 +135,66 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 min_cluster_size=8,
             )
 
+        # GS-2M photometric variance supervision (computed BEFORE backward).
+        # Reads the variance map built from PREVIOUS iterations' renders —
+        # a pixel with historically high luminance variance is a specular region
+        # whose Gaussians should have low roughness.  The gradient of this extra
+        # loss flows back through the rendered specular → roughness/metallic,
+        # giving a cross-view signal that persists even when the current camera
+        # is not at the specular peak.
+        loss_var = torch.tensor(0.0, device="cuda")
+        if (iteration >= opt.material_warmup_iters and opt.lambda_variance > 0.0):
+            pvar = gaussians.get_photometric_variance()   # (1,H,W) from prev iters
+            if pvar is not None:
+                # Cameras may have slightly different resolutions; resize to match.
+                if pvar.shape[-2:] != image.shape[-2:]:
+                    pvar = torch.nn.functional.interpolate(
+                        pvar.unsqueeze(0), size=image.shape[-2:],
+                        mode='bilinear', align_corners=False
+                    ).squeeze(0)
+                pvar_norm = pvar / (pvar.max() + 1e-6)
+                var_mask = (pvar_norm > opt.variance_threshold).float()
+                loss_var = (var_mask * torch.abs(image - gt_image)).sum() / (
+                    var_mask.sum() * image.shape[0] + 1e-6
+                )
+                loss = loss + opt.lambda_variance * loss_var
+
         # loss
-        total_loss = loss + dist_loss + normal_loss #+ material_loss
+        total_loss = loss + dist_loss + normal_loss + material_loss
         
         total_loss.backward()
+
+        # Update photometric EMA AFTER backward so current render feeds next iteration.
+        if iteration >= opt.material_warmup_iters:
+            with torch.no_grad():
+                rendered_luma = image.detach().mean(dim=0, keepdim=True)   # (1,H,W)
+                gaussians.update_photometric_ema(rendered_luma, decay=opt.variance_ema_decay)
+
+        # Material warmup: freeze roughness, metallic, and intensity for the
+        # first material_warmup_iters iterations so albedo, geometry and opacity
+        # converge to correct per-object colors against a fixed light level.
+        #
+        # Intensity must be frozen from iter 0 — if it is free while materials
+        # are frozen it shoots up immediately (it is the easiest lever to reduce
+        # the loss when roughness/metallic cannot move), and stays inflated even
+        # after materials are released, destroying metrics.
+        #
+        # Albedo absorbs any brightness mismatch against the fixed initial
+        # intensity, which is exactly its job during warmup.
+        if iteration < opt.material_warmup_iters:
+            for group in gaussians.optimizer.param_groups:
+                if group.get("name", "") in ("roughness", "metallic"):
+                    for p in group["params"]:
+                        if p.grad is not None:
+                            p.grad.zero_()
+
+        # Decay material parameter LRs after densification stops to prevent
+        # late-training drift when geometry is fixed and there is no longer
+        # opacity-reset regularization.
+        if iteration == opt.densify_until_iter:
+            for group in gaussians.optimizer.param_groups:
+                if group.get("name", "") in ("roughness", "metallic", "intensity", "ambient"):
+                    group["lr"] *= 0.1
 
         iter_end.record()
 
@@ -169,6 +241,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
+
 
             # Optimizer step
             if iteration < opt.iterations:
