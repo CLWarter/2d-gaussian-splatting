@@ -83,40 +83,31 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
         gt_image = viewpoint_cam.original_image.cuda()
+
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+
+        image = render_pkg["render"]
+        viewspace_point_tensor = render_pkg["viewspace_points"]
+        visibility_filter = render_pkg["visibility_filter"]
+        radii = render_pkg["radii"]
 
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-
-        # Highlight-aware photometric loss.
-        # Gives sparse bright specular regions a stronger training signal so
-        # roughness/metallic receive gradient even when those pixels are a small
-        # fraction of the image.
-        gt_luma = gt_image.mean(dim=0, keepdim=True)
-        highlight_mask = (gt_luma > opt.highlight_threshold).float()
-
-        highlight_denom = highlight_mask.sum() * image.shape[0] + 1e-6
-
-        loss_highlight = (
-            highlight_mask * torch.abs(image - gt_image)
-        ).sum() / highlight_denom
-
-        #loss = loss + opt.lambda_highlight * loss_highlight
 
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
 
         rend_dist = render_pkg["rend_dist"]
-        rend_normal  = render_pkg['rend_normal']
-        surf_normal = render_pkg['surf_normal']
-        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        normal_loss = lambda_normal * (normal_error).mean()
-        dist_loss = lambda_dist * (rend_dist).mean()
+        rend_normal = render_pkg["rend_normal"]
+        surf_normal = render_pkg["surf_normal"]
 
+        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+        normal_loss = lambda_normal * normal_error.mean()
+        dist_loss = lambda_dist * rend_dist.mean()
+
+        # material consistency
         material_loss = torch.tensor(0.0, device="cuda")
 
         if iteration >= opt.material_cluster_start:
@@ -135,40 +126,54 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 min_cluster_size=8,
             )
 
-        # GS-2M photometric variance supervision (computed BEFORE backward).
-        # Reads the variance map built from PREVIOUS iterations' renders —
-        # a pixel with historically high luminance variance is a specular region
-        # whose Gaussians should have low roughness.  The gradient of this extra
-        # loss flows back through the rendered specular → roughness/metallic,
-        # giving a cross-view signal that persists even when the current camera
-        # is not at the specular peak.
-        loss_var = torch.tensor(0.0, device="cuda")
-        if (iteration >= opt.material_warmup_iters and opt.lambda_variance > 0.0):
-            pvar = gaussians.get_photometric_variance()   # (1,H,W) from prev iters
-            if pvar is not None:
-                # Cameras may have slightly different resolutions; resize to match.
-                if pvar.shape[-2:] != image.shape[-2:]:
-                    pvar = torch.nn.functional.interpolate(
-                        pvar.unsqueeze(0), size=image.shape[-2:],
-                        mode='bilinear', align_corners=False
-                    ).squeeze(0)
-                pvar_norm = pvar / (pvar.max() + 1e-6)
-                var_mask = (pvar_norm > opt.variance_threshold).float()
-                loss_var = (var_mask * torch.abs(image - gt_image)).sum() / (
-                    var_mask.sum() * image.shape[0] + 1e-6
-                )
-                loss = loss + opt.lambda_variance * loss_var
+        # highlight roughness pressure
+        loss_highlight_rough = torch.tensor(0.0, device="cuda")
 
-        # loss
-        total_loss = loss + dist_loss + normal_loss + material_loss
-        
+        rough_map = render_pkg.get("rend_roughness", None)
+
+        if rough_map is not None and iteration > 3000:
+            gt_luma = gt_image.mean(dim=0, keepdim=True)
+            pred_luma = image.mean(dim=0, keepdim=True)
+
+            highlight_mask = (gt_luma > opt.highlight_threshold).float()
+            missing_highlight = torch.relu(gt_luma - pred_luma).detach()
+
+            rough_excess = torch.relu(rough_map - 0.45)
+            denom = highlight_mask.sum().clamp_min(1.0)
+
+            loss_highlight_rough = (
+                highlight_mask * missing_highlight * rough_excess.pow(2)
+            ).sum() / denom
+
+        # simple neutral prior, no variance/evidence
+        rough = gaussians.get_roughness
+        metal = gaussians.get_metallic
+
+        loss_neutral_roughness = (rough - 0.50).pow(2).mean()
+
+        rough_high_prior = torch.relu(rough - 0.75).pow(2).mean()
+        rough_low_prior = torch.relu(0.20 - rough).pow(2).mean()
+
+        metal_extreme_prior = (
+            torch.relu(0.02 - metal).pow(2).mean()
+            + torch.relu(metal - 0.98).pow(2).mean()
+        )
+
+        metal_prior = metal.pow(2).mean()
+
+        total_loss = (
+            loss
+            + dist_loss
+            + normal_loss
+            #+ material_loss
+            #+ opt.lambda_highlight_roughness * loss_highlight_rough
+            #+ opt.lambda_neutral_roughness * loss_neutral_roughness
+            #+ opt.lambda_rough_high_prior * rough_high_prior
+            #+ opt.lambda_rough_low_prior * rough_low_prior
+            #+ opt.lambda_metal_extreme_prior * metal_extreme_prior
+        )
+
         total_loss.backward()
-
-        # Update photometric EMA AFTER backward so current render feeds next iteration.
-        if iteration >= opt.material_warmup_iters:
-            with torch.no_grad():
-                rendered_luma = image.detach().mean(dim=0, keepdim=True)   # (1,H,W)
-                gaussians.update_photometric_ema(rendered_luma, decay=opt.variance_ema_decay)
 
         # Material warmup: freeze roughness, metallic, and intensity for the
         # first material_warmup_iters iterations so albedo, geometry and opacity

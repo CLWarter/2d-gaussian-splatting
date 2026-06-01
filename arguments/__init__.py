@@ -82,34 +82,42 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.ambient_lr = 0.001
         self.intensity_lr = 0.05
-        self.roughness_lr = 0.01
-        self.metallic_lr = 0.02
+        self.roughness_lr = 0.003
+        self.metallic_lr = 0.0005
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
-        self.lambda_dist = 0.0
+        self.lambda_dist = 0.001
         self.lambda_normal = 0.05
-        self.lambda_material_roughness = 0.0
-        self.lambda_material_metallic = 0.0
-        self.lambda_highlight = 0.5
-        self.highlight_threshold = 0.65
-        self.lambda_variance = 0.3
-        self.variance_threshold = 0.15
-        self.variance_ema_decay = 0.97
-        self.intensity_settle_iters = 500
-        self.material_cluster_count = 64
-        self.material_cluster_start = 8000
-        self.material_cluster_interval = 1000
-        self.material_warmup_iters = 3000
-        self.opacity_cull = 0.05
 
+        # Material regularization
+        self.lambda_material_roughness = 0.01
+        self.lambda_material_metallic = 0.0
+
+        # Material priors
+        #self.lambda_neutral_material = 0.001
+        self.lambda_neutral_roughness = 0.0003
+        self.lambda_rough_high_prior = 0.001
+        self.lambda_rough_low_prior = 0.002
+        self.lambda_metal_extreme_prior = 0.0001
+
+        self.lambda_highlight_roughness = 0.003
+        self.highlight_threshold = 0.7
+
+        # material clustering
+        self.material_cluster_count = 64
+        self.material_cluster_start = 30_000
+        self.material_cluster_interval = 1000
+        self.material_warmup_iters = 0
+
+        self.opacity_cull = 0.08
         self.densification_interval = 200
         self.opacity_reset_interval = 3000
         self.warmup_opacity_reset_interval = 1000
         self.densify_from_iter = 1000
-        self.densify_until_iter = 15_000
-        self.densify_grad_threshold = 0.0002
+        self.densify_until_iter = 10_000
+        self.densify_grad_threshold = 0.0005
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

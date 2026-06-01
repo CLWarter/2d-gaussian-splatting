@@ -294,8 +294,8 @@ class GaussianModel:
         metal_min = 0.00   # must match LIGHT_GGX_METALLIC_MIN
         metal_max = 1.00   # must match LIGHT_GGX_METALLIC_MAX
 
-        rough_init_value = 0.20
-        metal_init_value = 0.25
+        rough_init_value = 0.40
+        metal_init_value = 0.20
 
         rough_t = torch.tensor(
             (rough_init_value - rough_min) / (rough_max - rough_min),
