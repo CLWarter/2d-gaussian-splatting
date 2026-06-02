@@ -102,8 +102,21 @@ class OptimizationParams(ParamGroup):
         self.lambda_rough_low_prior = 0.002
         self.lambda_metal_extreme_prior = 0.0001
 
-        self.lambda_highlight_roughness = 0.003
-        self.highlight_threshold = 0.7
+        self.lambda_highlight_roughness = 0.0
+        self.lambda_highlight = 0.5
+        self.lambda_highlight_late = 5.0
+        self.lambda_highlight_core = 1.0
+        self.lambda_highlight_core_late = 10.0
+        self.lambda_highlight_core_roughness = 0.05
+        self.lambda_highlight_core_roughness_late = 0.2
+        self.material_brushup_start = 999999
+        self.material_brushup_end = 22000
+        self.material_brushup_period = 1000
+        self.material_brushup_length = 100
+
+        self.lambda_brushup_highlight = 0.0
+        self.highlight_quantile = 0.90
+        self.highlight_threshold = 0.55
 
         # material clustering
         self.material_cluster_count = 64
@@ -111,12 +124,12 @@ class OptimizationParams(ParamGroup):
         self.material_cluster_interval = 1000
         self.material_warmup_iters = 0
 
-        self.opacity_cull = 0.08
+        self.opacity_cull = 0.05
         self.densification_interval = 200
         self.opacity_reset_interval = 3000
         self.warmup_opacity_reset_interval = 1000
         self.densify_from_iter = 1000
-        self.densify_until_iter = 10_000
+        self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0005
         super().__init__(parser, "Optimization Parameters")
 

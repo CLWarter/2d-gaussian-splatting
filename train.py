@@ -11,7 +11,7 @@
 
 import os
 import torch
-from random import randint
+from random import randint, random
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
@@ -45,6 +45,19 @@ def save_lighting_cfg(model_path: str, cfg: dict):
     with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
         json.dump(cfg or {}, f, indent=2, sort_keys=True)
 
+def compute_gt_highlight_mask(gt_luma):
+    q_hi = torch.quantile(gt_luma.flatten(), 0.98)
+    q_lo = torch.quantile(gt_luma.flatten(), 0.90)
+
+    thresh_hi = torch.maximum(q_hi, torch.tensor(0.78, device=gt_luma.device))
+    thresh_lo = torch.maximum(q_lo, torch.tensor(0.55, device=gt_luma.device))
+
+    return torch.clamp(
+        (gt_luma - thresh_lo) / (thresh_hi - thresh_lo + 1e-6),
+        0.0,
+        1.0
+    ).detach()
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -65,6 +78,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
+    ema_highlight_for_log = 0.0
+
+    train_cams = scene.getTrainCameras()
+
+    highlight_cams = []
+
+    for cam in train_cams:
+        gt = cam.original_image.cuda()
+        luma = gt.mean(dim=0)
+
+        q95 = torch.quantile(luma.flatten(), 0.95)
+        q99 = torch.quantile(luma.flatten(), 0.99)
+
+        # highlight score: bright tail compared to general image brightness
+        highlight_contrast = q99 - q95
+
+        if q99 > opt.highlight_threshold or highlight_contrast > 0.08:
+            highlight_cams.append(cam)
+
+    print(f"[highlight cams] {len(highlight_cams)} / {len(train_cams)}")
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -78,10 +111,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
+        # Material brush-up: periodically force residual fitting through material/light,
+        # not through color, opacity, or geometry.
+        material_brushup = (
+            iteration >= opt.material_brushup_start
+            and iteration < opt.material_brushup_end
+            and ((iteration - opt.material_brushup_start) % opt.material_brushup_period) < opt.material_brushup_length
+        )
+
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        if iteration > 8000 and len(highlight_cams) > 0 and random() < 0.7:
+            viewpoint_cam = highlight_cams[randint(0, len(highlight_cams) - 1)]
+        else:
+            if not viewpoint_stack:
+                viewpoint_stack = train_cams.copy()
+            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         gt_image = viewpoint_cam.original_image.cuda()
 
@@ -126,25 +170,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 min_cluster_size=8,
             )
 
-        # highlight roughness pressure
-        loss_highlight_rough = torch.tensor(0.0, device="cuda")
-
-        rough_map = render_pkg.get("rend_roughness", None)
-
-        if rough_map is not None and iteration > 3000:
-            gt_luma = gt_image.mean(dim=0, keepdim=True)
-            pred_luma = image.mean(dim=0, keepdim=True)
-
-            highlight_mask = (gt_luma > opt.highlight_threshold).float()
-            missing_highlight = torch.relu(gt_luma - pred_luma).detach()
-
-            rough_excess = torch.relu(rough_map - 0.45)
-            denom = highlight_mask.sum().clamp_min(1.0)
-
-            loss_highlight_rough = (
-                highlight_mask * missing_highlight * rough_excess.pow(2)
-            ).sum() / denom
-
         # simple neutral prior, no variance/evidence
         rough = gaussians.get_roughness
         metal = gaussians.get_metallic
@@ -161,44 +186,142 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         metal_prior = metal.pow(2).mean()
 
-        total_loss = (
-            loss
-            + dist_loss
-            + normal_loss
-            #+ material_loss
-            #+ opt.lambda_highlight_roughness * loss_highlight_rough
-            #+ opt.lambda_neutral_roughness * loss_neutral_roughness
-            #+ opt.lambda_rough_high_prior * rough_high_prior
-            #+ opt.lambda_rough_low_prior * rough_low_prior
-            #+ opt.lambda_metal_extreme_prior * metal_extreme_prior
-        )
+        render_luma = 0.2126 * image[0:1] + 0.7152 * image[1:2] + 0.0722 * image[2:3]
+        gt_luma = 0.2126 * gt_image[0:1] + 0.7152 * gt_image[1:2] + 0.0722 * gt_image[2:3]
+
+        highlight_mask = compute_gt_highlight_mask(gt_luma)
+
+        highlight_loss = torch.tensor(0.0, device="cuda")
+        highlight_core_loss = torch.tensor(0.0, device="cuda")
+        highlight_core_rough_loss = torch.tensor(0.0, device="cuda")
+
+        if iteration > 12000:
+            # broad mask, same as visualized
+            highlight_loss = (
+                highlight_mask * torch.abs(render_luma - gt_luma)
+            ).sum() / (highlight_mask.sum() + 1e-6)
+
+            # small sharp highlight cores
+            q_core = torch.quantile(gt_luma.flatten(), 0.995)
+            core_thresh = torch.maximum(q_core, torch.tensor(0.85, device=gt_luma.device))
+
+            core_mask = (gt_luma > core_thresh).float().detach()
+
+            missing_core = torch.relu(gt_luma - render_luma).detach()
+
+            highlight_core_loss = (
+                core_mask * missing_core.pow(2)
+            ).sum() / (core_mask.sum() + 1e-6)
+
+            rough_map = render_pkg.get("rend_roughness", None)
+
+            if rough_map is not None:
+                rough_core_target = 0.18
+                rough_too_high_core = torch.relu(rough_map - rough_core_target)
+
+                highlight_core_rough_loss = (
+                    core_mask * missing_core * rough_too_high_core.pow(2)
+                ).sum() / (core_mask.sum() + 1e-6)
+
+        if iteration <= 20000:
+
+            highlight_w = 0.0
+
+            if iteration > 12000:
+                highlight_w = min(
+                    1.0,
+                    (iteration - 12000) / 3000.0
+                )
+
+            total_loss = (
+                loss
+                + dist_loss
+                + normal_loss
+                + highlight_w * opt.lambda_highlight * highlight_loss
+                + highlight_w * opt.lambda_highlight_core * highlight_core_loss
+                + highlight_w * opt.lambda_highlight_core_roughness * highlight_core_rough_loss
+            )
+
+        else:
+
+            total_loss = (
+                0.05 * loss
+                + opt.lambda_highlight_late * highlight_loss
+                + opt.lambda_highlight_core * highlight_core_loss
+                + opt.lambda_highlight_core_roughness * highlight_core_rough_loss
+            )
 
         total_loss.backward()
 
-        # Material warmup: freeze roughness, metallic, and intensity for the
-        # first material_warmup_iters iterations so albedo, geometry and opacity
-        # converge to correct per-object colors against a fixed light level.
-        #
-        # Intensity must be frozen from iter 0 — if it is free while materials
-        # are frozen it shoots up immediately (it is the easiest lever to reduce
-        # the loss when roughness/metallic cannot move), and stays inflated even
-        # after materials are released, destroying metrics.
-        #
-        # Albedo absorbs any brightness mismatch against the fixed initial
-        # intensity, which is exactly its job during warmup.
+        # ------------------------------------------------------------
+        # staged optimization
+        # ------------------------------------------------------------
+
+        if iteration < 7000:
+
+            freeze_names = (
+                "roughness",
+                "metallic",
+            )
+
+        elif iteration < 20000:
+
+            freeze_names = (
+                "metallic",
+            )
+
+        else:
+
+            freeze_names = (
+                "xyz",
+                "f_dc",
+                "f_rest",
+                "opacity",
+                "scaling",
+                "rotation",
+                "ambient",
+            )
+
+        for group in gaussians.optimizer.param_groups:
+
+            name = group.get("name", "")
+
+            if name in freeze_names:
+
+                for p in group["params"]:
+
+                    if p.grad is not None:
+                        p.grad.zero_()
+
+        # ------------------------------------------------------------
+        # material warmup
+        # ------------------------------------------------------------
+
         if iteration < opt.material_warmup_iters:
+
             for group in gaussians.optimizer.param_groups:
+
                 if group.get("name", "") in ("roughness", "metallic"):
+
                     for p in group["params"]:
+
                         if p.grad is not None:
                             p.grad.zero_()
 
-        # Decay material parameter LRs after densification stops to prevent
-        # late-training drift when geometry is fixed and there is no longer
-        # opacity-reset regularization.
+        # ------------------------------------------------------------
+        # LR decay after densification
+        # ------------------------------------------------------------
+
         if iteration == opt.densify_until_iter:
+
             for group in gaussians.optimizer.param_groups:
-                if group.get("name", "") in ("roughness", "metallic", "intensity", "ambient"):
+
+                if group.get("name", "") in (
+                    "roughness",
+                    "metallic",
+                    "intensity",
+                    "ambient"
+                ):
                     group["lr"] *= 0.1
 
         iter_end.record()
@@ -208,13 +331,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
-
+            ema_highlight_for_log = 0.4 * highlight_loss.item() + 0.6 * ema_highlight_for_log
 
             if iteration % 10 == 0:
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
                     "distort": f"{ema_dist_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
+                    "highlight": f"{ema_highlight_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -228,6 +352,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/material_loss', material_loss.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/highlight_loss', highlight_loss.item(), iteration)
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):

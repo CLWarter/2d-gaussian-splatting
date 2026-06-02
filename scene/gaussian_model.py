@@ -222,35 +222,6 @@ class GaussianModel:
     # iteration.
     # ------------------------------------------------------------------
 
-    def update_photometric_ema(self, luma: torch.Tensor, decay: float = 0.97) -> None:
-        """Update running EMA of per-pixel luminance.
-
-        Args:
-            luma:  (1, H, W) rendered luminance (float32, CUDA).
-            decay: EMA decay factor (high = slow adaptation; 0.97 works well).
-        """
-        if not hasattr(self, "_pvar_luma_ema") or self._pvar_luma_ema is None:
-            self._pvar_luma_ema  = luma.clone()
-            self._pvar_luma2_ema = (luma * luma).clone()
-        else:
-            # Different cameras may have different resolutions. Resize the
-            # incoming luma to match the stored EMA rather than resetting —
-            # resetting would discard all accumulated history.
-            if self._pvar_luma_ema.shape != luma.shape:
-                luma = torch.nn.functional.interpolate(
-                    luma.unsqueeze(0), size=self._pvar_luma_ema.shape[-2:],
-                    mode='bilinear', align_corners=False
-                ).squeeze(0)
-            self._pvar_luma_ema  = decay * self._pvar_luma_ema  + (1.0 - decay) * luma
-            self._pvar_luma2_ema = decay * self._pvar_luma2_ema + (1.0 - decay) * (luma * luma)
-
-    def get_photometric_variance(self) -> torch.Tensor | None:
-        """Return Var[luma] = E[L²] - E[L]² per pixel, or None if not yet initialized."""
-        if not hasattr(self, "_pvar_luma_ema") or self._pvar_luma_ema is None:
-            return None
-        var = self._pvar_luma2_ema - self._pvar_luma_ema ** 2
-        return var.clamp(min=0.0)
-
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -294,8 +265,8 @@ class GaussianModel:
         metal_min = 0.00   # must match LIGHT_GGX_METALLIC_MIN
         metal_max = 1.00   # must match LIGHT_GGX_METALLIC_MAX
 
-        rough_init_value = 0.40
-        metal_init_value = 0.20
+        rough_init_value = 0.45
+        metal_init_value = 0.05
 
         rough_t = torch.tensor(
             (rough_init_value - rough_min) / (rough_max - rough_min),

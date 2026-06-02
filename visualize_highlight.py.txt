@@ -1,0 +1,40 @@
+import os
+import torch
+from PIL import Image
+import torchvision.transforms.functional as TF
+import torchvision.utils as vutils
+
+path = "C:/Users/cwart/Projects/2d-gaussian-splatting/output/ThesisBlenderMetallicSpecStrong/export_iter_15000/gt/00007.png"
+out = "C:/Users/cwart/Projects/2d-gaussian-splatting/highlight_vis.png"
+
+img = Image.open(path).convert("RGB")
+gt = TF.to_tensor(img).cuda()
+
+gt_luma = 0.2126 * gt[0:1] + 0.7152 * gt[1:2] + 0.0722 * gt[2:3]
+
+q_hi = torch.quantile(gt_luma.flatten(), 0.98)
+q_lo = torch.quantile(gt_luma.flatten(), 0.90)
+
+thresh_hi = torch.maximum(q_hi, torch.tensor(0.78, device="cuda"))
+thresh_lo = torch.maximum(q_lo, torch.tensor(0.55, device="cuda"))
+
+highlight_mask = torch.clamp(
+    (gt_luma - thresh_lo) / (thresh_hi - thresh_lo + 1e-6),
+    0.0,
+    1.0
+)
+
+mask_rgb = highlight_mask.repeat(3, 1, 1)
+
+overlay = gt.clone()
+overlay[0:1] = torch.clamp(overlay[0:1] + 0.7 * highlight_mask, 0, 1)
+overlay[1:2] = torch.clamp(overlay[1:2] * (1.0 - 0.4 * highlight_mask), 0, 1)
+overlay[2:3] = torch.clamp(overlay[2:3] * (1.0 - 0.4 * highlight_mask), 0, 1)
+
+grid = torch.stack([gt, mask_rgb, overlay], dim=0)
+
+vutils.save_image(grid, out, nrow=3)
+
+print("saved:", out)
+print("q_lo:", q_lo.item(), "q_hi:", q_hi.item())
+print("thresh_lo:", thresh_lo.item(), "thresh_hi:", thresh_hi.item())
