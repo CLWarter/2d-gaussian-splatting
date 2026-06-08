@@ -194,11 +194,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         highlight_loss = torch.tensor(0.0, device="cuda")
         highlight_core_loss = torch.tensor(0.0, device="cuda")
         highlight_core_rough_loss = torch.tensor(0.0, device="cuda")
+        highlight_chroma_loss = torch.tensor(0.0, device="cuda")
 
         if iteration > 12000:
-            # broad mask, same as visualized
+            highlight_rgb_err = torch.abs(image - gt_image).mean(dim=0, keepdim=True)
+
             highlight_loss = (
-                highlight_mask * torch.abs(render_luma - gt_luma)
+                highlight_mask * highlight_rgb_err
+            ).sum() / (highlight_mask.sum() + 1e-6)
+
+            render_chroma = image - render_luma
+            gt_chroma = gt_image - gt_luma
+
+            chroma_err = torch.abs(render_chroma - gt_chroma).mean(dim=0, keepdim=True)
+
+            highlight_chroma_loss = (
+                highlight_mask * chroma_err
             ).sum() / (highlight_mask.sum() + 1e-6)
 
             # small sharp highlight cores
@@ -207,11 +218,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             core_mask = (gt_luma > core_thresh).float().detach()
 
-            missing_core = torch.relu(gt_luma - render_luma).detach()
+            core_rgb_err = torch.abs(image - gt_image).mean(dim=0, keepdim=True)
 
             highlight_core_loss = (
-                core_mask * missing_core.pow(2)
+                core_mask * core_rgb_err.pow(2)
             ).sum() / (core_mask.sum() + 1e-6)
+
+            missing_core = torch.relu(gt_luma - render_luma).detach()
 
             rough_map = render_pkg.get("rend_roughness", None)
 
@@ -238,6 +251,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 + dist_loss
                 + normal_loss
                 + highlight_w * opt.lambda_highlight * highlight_loss
+                + highlight_w * opt.lambda_highlight_chroma * highlight_chroma_loss
                 + highlight_w * opt.lambda_highlight_core * highlight_core_loss
                 + highlight_w * opt.lambda_highlight_core_roughness * highlight_core_rough_loss
             )
@@ -247,8 +261,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             total_loss = (
                 0.05 * loss
                 + opt.lambda_highlight_late * highlight_loss
-                + opt.lambda_highlight_core * highlight_core_loss
-                + opt.lambda_highlight_core_roughness * highlight_core_rough_loss
+                + opt.lambda_highlight_chroma_late * highlight_chroma_loss
+                + opt.lambda_highlight_core_late * highlight_core_loss
+                + opt.lambda_highlight_core_roughness_late * highlight_core_rough_loss
             )
 
         total_loss.backward()
@@ -280,6 +295,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 "scaling",
                 "rotation",
                 "ambient",
+                "metallic",
             )
 
         for group in gaussians.optimizer.param_groups:

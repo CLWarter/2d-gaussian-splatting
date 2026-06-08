@@ -105,6 +105,8 @@ class OptimizationParams(ParamGroup):
         self.lambda_highlight_roughness = 0.0
         self.lambda_highlight = 0.5
         self.lambda_highlight_late = 5.0
+        self.lambda_highlight_chroma = 0.2
+        self.lambda_highlight_chroma_late = 2.0
         self.lambda_highlight_core = 1.0
         self.lambda_highlight_core_late = 10.0
         self.lambda_highlight_core_roughness = 0.05

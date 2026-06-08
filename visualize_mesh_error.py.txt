@@ -1,0 +1,127 @@
+import argparse
+import numpy as np
+import open3d as o3d
+
+
+def colorize(values, max_dist):
+    t = np.clip(values / max_dist, 0.0, 1.0)
+    colors = np.zeros((len(t), 3), dtype=np.float64)
+
+    mask = t < 0.33
+    u = t[mask] / 0.33
+    colors[mask] = np.stack([0.0 * u, u, np.ones_like(u)], axis=1)
+
+    mask = (t >= 0.33) & (t < 0.66)
+    u = (t[mask] - 0.33) / 0.33
+    colors[mask] = np.stack([u, np.ones_like(u), np.ones_like(u) * (1.0 - u)], axis=1)
+
+    mask = t >= 0.66
+    u = (t[mask] - 0.66) / 0.34
+    colors[mask] = np.stack([np.ones_like(u), np.ones_like(u) * (1.0 - u), 0.0 * u], axis=1)
+
+    return colors
+
+
+def load_as_pointcloud(path, samples=300000):
+    mesh = o3d.io.read_triangle_mesh(path)
+
+    if not mesh.is_empty() and len(mesh.triangles) > 0:
+        mesh.compute_vertex_normals()
+        return mesh.sample_points_uniformly(number_of_points=samples)
+
+    pcd = o3d.io.read_point_cloud(path)
+    if pcd.is_empty():
+        raise RuntimeError(f"Could not load as mesh or point cloud: {path}")
+
+    return pcd
+
+
+def load_gt_as_pointcloud(path, samples=300000):
+    mesh = o3d.io.read_triangle_mesh(path)
+
+    if not mesh.is_empty() and len(mesh.triangles) > 0:
+        mesh.compute_vertex_normals()
+        return mesh.sample_points_uniformly(number_of_points=samples)
+
+    pcd = o3d.io.read_point_cloud(path)
+    if pcd.is_empty():
+        raise RuntimeError(f"Could not load GT as mesh or point cloud: {path}")
+
+    return pcd
+
+
+def compute_colored_pcd(pred_path, gt_path, samples, max_dist):
+    pred_pcd = load_as_pointcloud(pred_path, samples=samples)
+    gt_pcd = load_gt_as_pointcloud(gt_path, samples=samples)
+
+    distances = np.asarray(pred_pcd.compute_point_cloud_distance(gt_pcd))
+    pred_pcd.colors = o3d.utility.Vector3dVector(colorize(distances, max_dist))
+
+    print("Pred -> GT distance statistics:")
+    print(f"  mean:   {distances.mean():.6f}")
+    print(f"  median: {np.median(distances):.6f}")
+    print(f"  max:    {distances.max():.6f}")
+    print(f"  p95:    {np.percentile(distances, 95):.6f}")
+
+    return pred_pcd
+
+
+def compute_colored_mesh_vertices(pred_path, gt_path, samples, max_dist):
+    pred_mesh = o3d.io.read_triangle_mesh(pred_path)
+    if pred_mesh.is_empty() or len(pred_mesh.triangles) == 0:
+        print("[info] Predicted file has no triangles. Falling back to point-cloud mode.")
+        return compute_colored_pcd(pred_path, gt_path, samples, max_dist)
+
+    pred_mesh.compute_vertex_normals()
+    gt_pcd = load_gt_as_pointcloud(gt_path, samples=samples)
+
+    pred_vertices = np.asarray(pred_mesh.vertices)
+    pred_vertex_pcd = o3d.geometry.PointCloud()
+    pred_vertex_pcd.points = o3d.utility.Vector3dVector(pred_vertices)
+
+    distances = np.asarray(pred_vertex_pcd.compute_point_cloud_distance(gt_pcd))
+    pred_mesh.vertex_colors = o3d.utility.Vector3dVector(colorize(distances, max_dist))
+
+    print("Pred vertex -> GT distance statistics:")
+    print(f"  mean:   {distances.mean():.6f}")
+    print(f"  median: {np.median(distances):.6f}")
+    print(f"  max:    {distances.max():.6f}")
+    print(f"  p95:    {np.percentile(distances, 95):.6f}")
+
+    return pred_mesh
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pred", required=True)
+    parser.add_argument("--gt", required=True)
+    parser.add_argument("--out", default="")
+    parser.add_argument("--samples", type=int, default=300000)
+    parser.add_argument("--max_dist", type=float, default=0.1)
+    parser.add_argument("--mode", choices=["mesh", "pcd"], default="mesh")
+    parser.add_argument("--show", action="store_true")
+    args = parser.parse_args()
+
+    if args.mode == "mesh":
+        geom = compute_colored_mesh_vertices(
+            args.pred, args.gt, args.samples, args.max_dist
+        )
+    else:
+        geom = compute_colored_pcd(
+            args.pred, args.gt, args.samples, args.max_dist
+        )
+
+    if args.out:
+        if isinstance(geom, o3d.geometry.TriangleMesh):
+            o3d.io.write_triangle_mesh(args.out, geom)
+        else:
+            o3d.io.write_point_cloud(args.out, geom)
+        print(f"Saved colored geometry to: {args.out}")
+
+    if args.show:
+        frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2)
+        o3d.visualization.draw_geometries([geom, frame])
+
+
+if __name__ == "__main__":
+    main()
