@@ -1,0 +1,62 @@
+import torch
+from PIL import Image, ImageDraw, ImageFont
+import torchvision.transforms.functional as TF
+import torchvision.utils as vutils
+
+path        = "C:/Users/cwart/Projects/2d-gaussian-splatting/output/ThesisBlenderMetallicSpecStrong/export_iter_15000/gt/00007.png"
+render_path = None   # <-- set to the matching rendered frame for the TRUE loss share; leave None for pixel-share
+out         = "C:/Users/cwart/Projects/2d-gaussian-splatting/highlight_vis.png"
+
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+gt = TF.to_tensor(Image.open(path).convert("RGB")).to(dev)
+gt_luma = 0.2126*gt[0:1] + 0.7152*gt[1:2] + 0.0722*gt[2:3]
+
+q_hi = torch.quantile(gt_luma.flatten(), 0.98)
+q_lo = torch.quantile(gt_luma.flatten(), 0.90)
+thresh_hi = torch.maximum(q_hi, torch.tensor(0.78, device=dev))
+thresh_lo = torch.maximum(q_lo, torch.tensor(0.55, device=dev))
+highlight_mask = torch.clamp((gt_luma - thresh_lo) / (thresh_hi - thresh_lo + 1e-6), 0.0, 1.0)
+
+# --- how much of the loss is in the highlight region ---
+if render_path:
+    rd = TF.to_tensor(Image.open(render_path).convert("RGB")).to(dev)
+    per_pixel = (rd - gt).abs().mean(0, keepdim=True)          # L1 per pixel
+    total = per_pixel.sum() + 1e-8
+    share = (highlight_mask * per_pixel).sum() / total
+    kind = "of total L1 image loss"
+else:
+    share = highlight_mask.sum() / highlight_mask.numel()      # pixel share = loss share under a uniform loss
+    kind = "of a uniform image loss (= pixel share)"
+pct = float(share) * 100.0
+
+# --- the 3-panel grid (as before) ---
+mask_rgb = highlight_mask.repeat(3, 1, 1)
+overlay = gt.clone()
+overlay[0:1] = torch.clamp(overlay[0:1] + 0.7 * highlight_mask, 0, 1)
+overlay[1:2] = torch.clamp(overlay[1:2] * (1.0 - 0.4 * highlight_mask), 0, 1)
+overlay[2:3] = torch.clamp(overlay[2:3] * (1.0 - 0.4 * highlight_mask), 0, 1)
+grid_pil = TF.to_pil_image(vutils.make_grid(torch.stack([gt, mask_rgb, overlay], 0), nrow=3).cpu())
+
+# --- progress bar with PIL ---
+W, barH, m = grid_pil.width, 96, 22
+bar = Image.new("RGB", (W, barH), (255, 255, 255))
+d = ImageDraw.Draw(bar)
+try:
+    fbold = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 28)
+    fsmall = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 18)
+except Exception:
+    fbold = fsmall = ImageFont.load_default()
+
+bx0, by0, bx1, h = m, 52, W - m, 26
+d.text((m, 12), f"Highlights = {pct:.2f}% {kind}", fill=(20, 20, 20), font=fbold)
+d.rectangle([bx0, by0, bx1, by0 + h], outline=(120, 120, 120), width=2, fill=(236, 236, 236))
+fillw = int((bx1 - bx0) * min(max(pct / 100.0, 0.0), 1.0))
+d.rectangle([bx0, by0, bx0 + max(fillw, 2), by0 + h], fill=(224, 160, 32))   # amber = highlight
+d.text((bx0, by0 + h + 4), "the rest is diffuse / background", fill=(120, 120, 120), font=fsmall)
+
+# --- stack grid over bar, save ---
+combined = Image.new("RGB", (W, grid_pil.height + barH), (255, 255, 255))
+combined.paste(grid_pil, (0, 0))
+combined.paste(bar, (0, grid_pil.height))
+combined.save(out)
+print("saved:", out, "| pct = %.2f%%" % pct, "|", kind)
