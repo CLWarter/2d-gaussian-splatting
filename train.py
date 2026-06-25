@@ -45,18 +45,30 @@ def save_lighting_cfg(model_path: str, cfg: dict):
     with open(os.path.join(model_path, "cfg_lighting.json"), "w", encoding="utf-8") as f:
         json.dump(cfg or {}, f, indent=2, sort_keys=True)
 
-def compute_gt_highlight_mask(gt_luma):
-    q_hi = torch.quantile(gt_luma.flatten(), 0.98)
-    q_lo = torch.quantile(gt_luma.flatten(), 0.90)
-
-    thresh_hi = torch.maximum(q_hi, torch.tensor(0.78, device=gt_luma.device))
-    thresh_lo = torch.maximum(q_lo, torch.tensor(0.55, device=gt_luma.device))
-
-    return torch.clamp(
-        (gt_luma - thresh_lo) / (thresh_hi - thresh_lo + 1e-6),
-        0.0,
-        1.0
-    ).detach()
+def compute_gt_highlight_mask(gt_image, gt_luma, opt):
+    # (#6) quantile-based thresholds with a LOW absolute floor, so the mask
+    # still fires on darker captures / less reflective materials instead of
+    # silently selecting nothing.
+    q_lo = torch.quantile(gt_luma.flatten(), getattr(opt, "hl_mask_q_lo", 0.90))
+    q_hi = torch.quantile(gt_luma.flatten(), getattr(opt, "hl_mask_q_hi", 0.98))
+    thr_lo = torch.maximum(q_lo, torch.tensor(getattr(opt, "hl_mask_floor_lo", 0.35), device=gt_luma.device))
+    thr_hi = torch.maximum(q_hi, torch.tensor(getattr(opt, "hl_mask_floor_hi", 0.55), device=gt_luma.device))
+    soft = torch.clamp((gt_luma - thr_lo) / (thr_hi - thr_lo + 1e-6), 0.0, 1.0)
+ 
+    # (#5/robustness) neutrality gate: specular highlights are near-neutral;
+    # reject bright *colored* surfaces (e.g. cobblestone) so highlight
+    # supervision doesn't fire on the floor.
+    maxc, _ = gt_image.max(dim=0, keepdim=True)
+    minc, _ = gt_image.min(dim=0, keepdim=True)
+    neutral = (maxc - minc < getattr(opt, "hl_mask_max_sat", 0.25)).float()
+    return (soft * neutral).detach()
+ 
+ 
+def _soft_band(luma, q, floor, width=0.12):
+    # helper: soft 0..1 membership above a quantile/floor threshold
+    thr = torch.maximum(torch.quantile(luma.flatten(), q),
+                        torch.tensor(floor, device=luma.device))
+    return torch.clamp((luma - thr) / (width), 0.0, 1.0)
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
@@ -97,6 +109,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if q99 > opt.highlight_threshold or highlight_contrast > 0.08:
             highlight_cams.append(cam)
 
+    view_err = {cam: 1.0 for cam in highlight_cams}
+
     print(f"[highlight cams] {len(highlight_cams)} / {len(train_cams)}")
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -120,15 +134,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         )
 
         # Pick a random Camera
-        if iteration > 8000 and len(highlight_cams) > 0 and random() < 0.7:
-            viewpoint_cam = highlight_cams[randint(0, len(highlight_cams) - 1)]
+        use_highlight = (
+            iteration > opt.hl_onset
+            and len(view_err) > 0
+            and random() < 0.7
+        )
+
+        if use_highlight:
+            cams = list(view_err)
+            s = torch.tensor([view_err[c] for c in cams]) + 1e-6   # avoid all-zero → NaN
+            p = 0.7 * (s / s.sum()) + 0.3 / len(cams)              # error-weighted + uniform floor
+            viewpoint_cam = cams[torch.multinomial(p, 1).item()]
         else:
             if not viewpoint_stack:
                 viewpoint_stack = train_cams.copy()
-            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-        
-        gt_image = viewpoint_cam.original_image.cuda()
+            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
 
+        gt_image = viewpoint_cam.original_image.cuda()
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
 
         image = render_pkg["render"]
@@ -189,83 +211,113 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         render_luma = 0.2126 * image[0:1] + 0.7152 * image[1:2] + 0.0722 * image[2:3]
         gt_luma = 0.2126 * gt_image[0:1] + 0.7152 * gt_image[1:2] + 0.0722 * gt_image[2:3]
 
-        highlight_mask = compute_gt_highlight_mask(gt_luma)
-
         highlight_loss = torch.tensor(0.0, device="cuda")
         highlight_core_loss = torch.tensor(0.0, device="cuda")
         highlight_core_rough_loss = torch.tensor(0.0, device="cuda")
         highlight_chroma_loss = torch.tensor(0.0, device="cuda")
+        antibloom_loss          = torch.tensor(0.0, device="cuda")
 
-        if iteration > 12000:
-            highlight_rgb_err = torch.abs(image - gt_image).mean(dim=0, keepdim=True)
+        highlight_mask = compute_gt_highlight_mask(gt_image, gt_luma, opt)
 
-            highlight_loss = (
-                highlight_mask * highlight_rgb_err
-            ).sum() / (highlight_mask.sum() + 1e-6)
+        onset = getattr(opt, "hl_onset", 10000)
+        ramp  = getattr(opt, "hl_ramp", 6000)
 
+        geometry_ready = True
+        
+        if iteration > onset and geometry_ready:
+        
+            # (#7) PLACEMENT: supervise the UNION of GT-bright and RENDER-bright pixels,
+            # so a highlight the render puts in the WRONG place is still corrected
+            # (the mask no longer only sits where GT is bright).
+            rnd_soft = _soft_band(render_luma.squeeze(0),
+                                getattr(opt, "hl_mask_q_hi", 0.98),
+                                getattr(opt, "hl_mask_floor_hi", 0.55))[None]
+            union_mask = torch.maximum(highlight_mask, rnd_soft).detach()
+        
+            # (#5) BRIGHTNESS term on LUMINANCE only — chroma owns color, no double count.
+            lum_err = torch.abs(render_luma - gt_luma)
+            highlight_loss = (union_mask * lum_err).sum() / (union_mask.sum() + 1e-6)
+
+            if viewpoint_cam in view_err:
+                view_err[viewpoint_cam] = 0.9 * view_err[viewpoint_cam] + 0.1 * highlight_loss.item()
+        
+            # (#5) COLOR term owns chroma (color with luminance removed).
             render_chroma = image - render_luma
             gt_chroma = gt_image - gt_luma
-
             chroma_err = torch.abs(render_chroma - gt_chroma).mean(dim=0, keepdim=True)
-
-            highlight_chroma_loss = (
-                highlight_mask * chroma_err
-            ).sum() / (highlight_mask.sum() + 1e-6)
-
-            # small sharp highlight cores
-            q_core = torch.quantile(gt_luma.flatten(), 0.995)
-            core_thresh = torch.maximum(q_core, torch.tensor(0.85, device=gt_luma.device))
-
-            core_mask = (gt_luma > core_thresh).float().detach()
-
-            core_rgb_err = torch.abs(image - gt_image).mean(dim=0, keepdim=True)
-
-            highlight_core_loss = (
-                core_mask * core_rgb_err.pow(2)
-            ).sum() / (core_mask.sum() + 1e-6)
-
-            missing_core = torch.relu(gt_luma - render_luma).detach()
-
+            highlight_chroma_loss = (union_mask * chroma_err).sum() / (union_mask.sum() + 1e-6)
+        
+            # CORE mask: (#6) quantile + low floor, (#7) union with render-bright cores.
+            q_core = torch.quantile(gt_luma.flatten(), getattr(opt, "hl_core_q", 0.995))
+            core_thr = torch.maximum(q_core, torch.tensor(getattr(opt, "hl_core_floor", 0.60), device=gt_luma.device))
+            gt_core   = (gt_luma > core_thr).float()
+            rnd_core  = (render_luma > core_thr).float()
+            core_mask = torch.maximum(gt_core, rnd_core).detach()
+        
+            core_err = torch.abs(image - gt_image).mean(dim=0, keepdim=True)
+            highlight_core_loss = (core_mask * core_err.pow(2)).sum() / (core_mask.sum() + 1e-6)
+        
+            # (#1) ANTI-BLOOM: penalize render BRIGHTER than GT *outside* GT highlights.
+            # This is the missing brake on specular overspill. With intensity free
+            # (dependency above), it dims via energy rather than widening roughness.
+            excess_luma = torch.relu(render_luma - gt_luma)
+            nonhighlight = (1.0 - highlight_mask)
+            antibloom_loss = (nonhighlight * excess_luma.pow(2)).sum() / (nonhighlight.sum() + 1e-6)
+        
+            # ROUGHNESS coupling: (#2) bidirectional, (#3) no magic 0.18 target,
+            # (#4) NOT detached — driven by the actual signed core residual so it
+            # scales with how wrong the render is, and brightening backprops too.
             rough_map = render_pkg.get("rend_roughness", None)
-
             if rough_map is not None:
-                rough_core_target = 0.18
-                rough_too_high_core = torch.relu(rough_map - rough_core_target)
+                core_resid = (gt_luma - render_luma)            # + : too dark, - : too bright
+                too_dark   = torch.relu(core_resid)
+                too_bright = torch.relu(-core_resid)
+        
+                # too dark in a core -> lower roughness (sharpen). magnitude ∝ deficit.
+                sharpen = (core_mask * too_dark * rough_map).sum() / (core_mask.sum() + 1e-6)
+                # too bright in a core -> raise roughness (soften), SMALL weight, because
+                # brightness should be removed by energy (anti-bloom), not by widening.
+                soften  = (core_mask * too_bright * (1.0 - rough_map)).sum() / (core_mask.sum() + 1e-6)
+        
+                highlight_core_rough_loss = sharpen + getattr(opt, "hl_soften_w", 0.3) * soften
 
-                highlight_core_rough_loss = (
-                    core_mask * missing_core * rough_too_high_core.pow(2)
-                ).sum() / (core_mask.sum() + 1e-6)
+        lambda_antibloom        = getattr(opt, "lambda_antibloom", 0.5)
+        lambda_antibloom_late   = getattr(opt, "lambda_antibloom_late", 1.0)
+        lambda_hl_rough         = getattr(opt, "lambda_hl_rough", 1.0)
+        lambda_photo_late       = getattr(opt, "lambda_photo_late", 0.30)
+        lambda_intensity_anchor = getattr(opt, "lambda_intensity_anchor", 0.2)
 
+        intensity_prior = torch.tensor(0.0, device="cuda")
+        cur_intensity = getattr(gaussians, "get_intensity", None)
+        if iteration == 20000 and cur_intensity is not None:
+            intensity_anchor = cur_intensity.detach().clone()
+        if iteration > 20000 and intensity_anchor is not None and cur_intensity is not None:
+            intensity_prior = (cur_intensity - intensity_anchor).pow(2).mean()
+        
         if iteration <= 20000:
-
             highlight_w = 0.0
-
-            if iteration > 12000:
-                highlight_w = min(
-                    1.0,
-                    (iteration - 12000) / 3000.0
-                )
-
+            if iteration > onset:
+                highlight_w = min(1.0, (iteration - onset) / float(ramp))   # (#8) gentle ramp
+        
             total_loss = (
-                loss
-                + dist_loss
-                + normal_loss
-                + highlight_w * opt.lambda_highlight * highlight_loss
+                loss + dist_loss + normal_loss
+                + highlight_w * opt.lambda_highlight        * highlight_loss
                 + highlight_w * opt.lambda_highlight_chroma * highlight_chroma_loss
-                + highlight_w * opt.lambda_highlight_core * highlight_core_loss
-                + highlight_w * opt.lambda_highlight_core_roughness * highlight_core_rough_loss
+                + highlight_w * opt.lambda_highlight_core   * highlight_core_loss
+                + highlight_w * lambda_hl_rough             * highlight_core_rough_loss
+                + highlight_w * lambda_antibloom            * antibloom_loss
             )
-
         else:
-
             total_loss = (
-                0.05 * loss
-                + opt.lambda_highlight_late * highlight_loss
+                lambda_photo_late * loss
+                + opt.lambda_highlight_late        * highlight_loss
                 + opt.lambda_highlight_chroma_late * highlight_chroma_loss
-                + opt.lambda_highlight_core_late * highlight_core_loss
-                + opt.lambda_highlight_core_roughness_late * highlight_core_rough_loss
+                + opt.lambda_highlight_core_late   * highlight_core_loss
+                + lambda_hl_rough                  * highlight_core_rough_loss
+                + lambda_antibloom_late            * antibloom_loss
+                + lambda_intensity_anchor          * intensity_prior
             )
-
+        
         total_loss.backward()
 
         # ------------------------------------------------------------
@@ -282,7 +334,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         elif iteration < 20000:
 
             freeze_names = (
-                "metallic",
+                
             )
 
         else:
@@ -295,7 +347,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 "scaling",
                 "rotation",
                 "ambient",
-                "metallic",
             )
 
         for group in gaussians.optimizer.param_groups:
@@ -365,10 +416,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Log and save
             if tb_writer is not None:
-                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/material_loss', material_loss.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/highlight_loss', highlight_loss.item(), iteration)
+                tb_writer.add_scalar("hl/antibloom", float(antibloom_loss), iteration)
+                tb_writer.add_scalar("hl/core_rough", float(highlight_core_rough_loss), iteration)
+                tb_writer.add_scalar("diag/mean_roughness", float(gaussians.get_roughness.mean()), iteration)
+                tb_writer.add_scalar("diag/gt_highlight_area", float(highlight_mask.mean()), iteration)
+                tb_writer.add_scalar("diag/render_highlight_area",
+                                    float((render_luma > 0.78).float().mean()), iteration)
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):

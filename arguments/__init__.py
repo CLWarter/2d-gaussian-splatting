@@ -120,6 +120,9 @@ class OptimizationParams(ParamGroup):
         self.highlight_quantile = 0.90
         self.highlight_threshold = 0.55
 
+        self.hl_onset = 10000
+        self.hl_ramp = 6000
+
         # material clustering
         self.material_cluster_count = 64
         self.material_cluster_start = 30_000
